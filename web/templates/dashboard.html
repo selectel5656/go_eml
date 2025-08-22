@@ -32,7 +32,11 @@
     </select>
     <label><input type="checkbox" name="firstsep"> Первый в TO, остальные в выбранное поле</label>
 
-    <input type="submit" value="Отправить">
+    <input type="submit" value="Запустить отправку" {{if .Sending}}disabled{{end}}>
+</form>
+
+<form method="POST" action="/send/stop">
+    <input type="submit" value="Стоп" {{if not .Sending}}disabled{{end}}>
 </form>
 
 <label>Лог запросов:</label>

@@ -5,6 +5,7 @@
     <label>User-Agent:</label><input type="text" name="useragent" value="{{.UserAgent}}"><br>
     <label>Писем на аккаунт:</label><input type="number" name="sendlimit" value="{{.SendPerAccount}}"><br>
     <label>Гонять аккаунты по кругу:</label><input type="checkbox" name="cycle" {{if .CycleAccounts}}checked{{end}}><br>
+    <label>Потоков отправки:</label><input type="number" name="threads" value="{{.Threads}}"><br>
     <label>Новый пароль администратора:</label><input type="password" name="password"><br>
     <input type="submit" value="Сохранить">
 </form>

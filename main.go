@@ -63,6 +63,10 @@ type App struct {
 	CycleAccounts  bool
 	CurrentAccount int
 
+	Threads int
+	Sending bool
+	Stop    bool
+
 	LastLog string
 }
 
@@ -72,11 +76,13 @@ var app = &App{
 	AdminPass:      "admin",
 	SendPerAccount: 1,
 	CycleAccounts:  true,
+	Threads:        1,
 }
 
 type EmailEntry struct {
 	Name  string
 	Email string
+	Sent  bool
 }
 
 type Attachment struct {
@@ -200,10 +206,12 @@ func main() {
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/dashboard", requireAuth(handleDashboard))
 	http.HandleFunc("/send", requireAuth(handleSend))
+	http.HandleFunc("/send/stop", requireAuth(handleSendStop))
 	http.HandleFunc("/emails", requireAuth(handleEmails))
 	http.HandleFunc("/emails/add", requireAuth(handleEmailsAdd))
 	http.HandleFunc("/emails/upload", requireAuth(handleEmailsUpload))
 	http.HandleFunc("/emails/delete", requireAuth(handleEmailsDelete))
+	http.HandleFunc("/emails/reset", requireAuth(handleEmailsReset))
 	http.HandleFunc("/macros", requireAuth(handleMacros))
 	http.HandleFunc("/macros/add", requireAuth(handleMacrosAdd))
 	http.HandleFunc("/macros/delete", requireAuth(handleMacrosDelete))
@@ -275,6 +283,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Title":       "Письмо",
 		"Attachments": app.Attachments,
 		"Log":         app.LastLog,
+		"Sending":     app.Sending,
 	}
 	if msg := r.URL.Query().Get("msg"); msg != "" {
 		data["Message"] = msg
@@ -288,6 +297,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 func handleSend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Redirect(w, r, "/dashboard", http.StatusFound)
+		return
+	}
+	if app.Sending {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Уже выполняется отправка"), http.StatusFound)
 		return
 	}
 	subject := r.FormValue("subject")
@@ -311,13 +324,51 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	logs, err := sendEmail(subject, body, atts, rcount, rmethod, firstSep)
-	app.LastLog = logs
-	if err != nil {
-		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape(err.Error()), http.StatusFound)
-		return
+	app.Stop = false
+	app.Sending = true
+	go massSend(subject, body, atts, rcount, rmethod, firstSep)
+	http.Redirect(w, r, "/dashboard?msg="+url.QueryEscape("Отправка запущена"), http.StatusFound)
+}
+
+func handleSendStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		app.Stop = true
 	}
-	http.Redirect(w, r, "/dashboard?msg="+url.QueryEscape("Письмо отправлено"), http.StatusFound)
+	http.Redirect(w, r, "/dashboard", http.StatusFound)
+}
+
+func massSend(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) {
+	for {
+		if app.Stop {
+			break
+		}
+		idxs := []int{}
+		for i, e := range app.Emails {
+			if !e.Sent {
+				idxs = append(idxs, i)
+				if len(idxs) == rcount {
+					break
+				}
+			}
+		}
+		if len(idxs) == 0 {
+			break
+		}
+		var batch []EmailEntry
+		for _, idx := range idxs {
+			batch = append(batch, app.Emails[idx])
+		}
+		logs, err := sendEmail(subject, body, atts, batch, method, firstSep)
+		app.LastLog = logs
+		if err == nil {
+			for _, idx := range idxs {
+				app.Emails[idx].Sent = true
+			}
+		} else {
+			break
+		}
+	}
+	app.Sending = false
 }
 
 func handleEmails(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +405,13 @@ func handleEmailsDelete(w http.ResponseWriter, r *http.Request) {
 		if i >= 0 && i < len(app.Emails) {
 			app.Emails = append(app.Emails[:i], app.Emails[i+1:]...)
 		}
+	}
+	http.Redirect(w, r, "/emails", http.StatusFound)
+}
+
+func handleEmailsReset(w http.ResponseWriter, r *http.Request) {
+	for i := range app.Emails {
+		app.Emails[i].Sent = false
 	}
 	http.Redirect(w, r, "/emails", http.StatusFound)
 }
@@ -554,6 +612,7 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		"UserAgent":      app.UserAgent,
 		"SendPerAccount": app.SendPerAccount,
 		"CycleAccounts":  app.CycleAccounts,
+		"Threads":        app.Threads,
 	}
 	render(w, "settings", data)
 }
@@ -570,6 +629,11 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 			app.SendPerAccount = v
 		}
 	}
+	if t := r.FormValue("threads"); t != "" {
+		if v, err := strconv.Atoi(t); err == nil && v > 0 {
+			app.Threads = v
+		}
+	}
 	app.CycleAccounts = r.FormValue("cycle") == "on"
 	if p := r.FormValue("password"); p != "" {
 		app.AdminPass = p
@@ -580,6 +644,7 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"UserAgent":      app.UserAgent,
 		"SendPerAccount": app.SendPerAccount,
 		"CycleAccounts":  app.CycleAccounts,
+		"Threads":        app.Threads,
 		"Message":        "Сохранено",
 	}
 	render(w, "settings", data)
@@ -756,22 +821,18 @@ func generateOperationID(acc Account, log *strings.Builder) (string, error) {
 	return res.OperationID, nil
 }
 
-func sendEmail(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) (string, error) {
+func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry, method string, firstSep bool) (string, error) {
 	var log strings.Builder
 	if len(app.Accounts) == 0 {
 		return log.String(), fmt.Errorf("нет аккаунтов")
 	}
-	if len(app.Emails) == 0 {
+	if len(recipients) == 0 {
 		return log.String(), fmt.Errorf("нет получателей")
 	}
-	if rcount > len(app.Emails) {
-		rcount = len(app.Emails)
-	}
 
-	var recipients []string
-	for i := 0; i < rcount; i++ {
-		e := app.Emails[i]
-		recipients = append(recipients, fmt.Sprintf("\"%s\" <%s>", e.Name, e.Email))
+	var recipientStrs []string
+	for _, e := range recipients {
+		recipientStrs = append(recipientStrs, fmt.Sprintf("\"%s\" <%s>", e.Name, e.Email))
 	}
 
 	// choose account considering send limits
@@ -831,25 +892,25 @@ func sendEmail(subject, body string, atts []Attachment, rcount int, method strin
 	}
 	switch method {
 	case "cc":
-		if firstSep && len(recipients) > 0 {
-			payload["to"] = recipients[0]
-			if len(recipients) > 1 {
-				payload["cc"] = strings.Join(recipients[1:], ";")
+		if firstSep && len(recipientStrs) > 0 {
+			payload["to"] = recipientStrs[0]
+			if len(recipientStrs) > 1 {
+				payload["cc"] = strings.Join(recipientStrs[1:], ";")
 			}
 		} else {
-			payload["cc"] = strings.Join(recipients, ";")
+			payload["cc"] = strings.Join(recipientStrs, ";")
 		}
 	case "bcc":
-		if firstSep && len(recipients) > 0 {
-			payload["to"] = recipients[0]
-			if len(recipients) > 1 {
-				payload["bcc"] = strings.Join(recipients[1:], ";")
+		if firstSep && len(recipientStrs) > 0 {
+			payload["to"] = recipientStrs[0]
+			if len(recipientStrs) > 1 {
+				payload["bcc"] = strings.Join(recipientStrs[1:], ";")
 			}
 		} else {
-			payload["bcc"] = strings.Join(recipients, ";")
+			payload["bcc"] = strings.Join(recipientStrs, ";")
 		}
 	default:
-		payload["to"] = strings.Join(recipients, ";")
+		payload["to"] = strings.Join(recipientStrs, ";")
 	}
 	b, _ := json.Marshal(payload)
 	url := fmt.Sprintf("https://%s/api/mobile/v1/send?app_state=foreground&uuid=%s", app.Domain, acc.UUID)
