@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -108,7 +110,22 @@ func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte) (int,
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+
+	reader := resp.Body
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		if gr, err := gzip.NewReader(resp.Body); err == nil {
+			defer gr.Close()
+			reader = gr
+		}
+	case "deflate":
+		if zr, err := zlib.NewReader(resp.Body); err == nil {
+			defer zr.Close()
+			reader = zr
+		}
+	}
+
+	respBody, _ := io.ReadAll(reader)
 	log.WriteString(fmt.Sprintf("Response %d\n%s\n", resp.StatusCode, string(respBody)))
 	return resp.StatusCode, respBody, nil
 }
@@ -510,7 +527,7 @@ func checkAccount(acc Account, log *strings.Builder) error {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Language", "ru-RU;q=1, en-RU;q=0.9")
 	status, body, err := doLoggedRequest(log, req, nil)
@@ -539,7 +556,7 @@ func generateOperationID(acc Account, log *strings.Builder) (string, error) {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Language", "ru-RU;q=1")
 	req.Header.Set("Content-Length", "0")
@@ -679,6 +696,7 @@ func uploadAttachment(acc Account, path string, log *strings.Builder) (string, s
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
 	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	status, respBody, err := doLoggedRequest(log, req, bodyBytes)
 	if err != nil {
