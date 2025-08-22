@@ -158,7 +158,7 @@ func initDB() {
 		panic(err)
 	}
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(255) PRIMARY KEY, value TEXT)`,
+		`CREATE TABLE IF NOT EXISTS settings (name VARCHAR(255) PRIMARY KEY, value TEXT)`,
 		`CREATE TABLE IF NOT EXISTS emails (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), email VARCHAR(255), sent TINYINT(1))`,
 		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, vals TEXT, sequential TINYINT(1), idx INT)`,
 		`CREATE TABLE IF NOT EXISTS attachments (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), macro VARCHAR(255), path TEXT, inline TINYINT(1), inline_macro VARCHAR(255), mime VARCHAR(100))`,
@@ -179,7 +179,7 @@ func initDB() {
 }
 
 func loadSettings() {
-	rows, err := db.Query("SELECT key, value FROM settings")
+	rows, err := db.Query("SELECT name, value FROM settings")
 	if err != nil {
 		return
 	}
@@ -224,7 +224,7 @@ func loadSettings() {
 }
 
 func saveSetting(k, v string) {
-	db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", k, v)
+	db.Exec("INSERT INTO settings(name,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", k, v)
 }
 
 func saveSettings() {
