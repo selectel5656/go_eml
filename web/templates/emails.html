@@ -10,7 +10,7 @@
 </form>
 <ul>
     {{range $i, $e := .Emails}}
-    <li>{{if $e.Name}}{{$e.Name}} &lt;{{$e.Email}}&gt;{{else}}{{$e.Email}}{{end}} <a href="/emails/delete?i={{$i}}">удалить</a></li>
+    <li>{{if $e.Name}}{{$e.Name}} &lt;{{$e.Email}}&gt;{{else}}{{$e.Email}}{{end}} <a href="/emails/delete?i={{$i}}" class="delete-link">удалить</a></li>
     {{end}}
 </ul>
 {{end}}

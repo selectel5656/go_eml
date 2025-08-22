@@ -10,7 +10,7 @@
 </form>
 <ul>
     {{range $i, $a := .Accounts}}
-    <li>{{$a.Login}} {{$a.UUID}} <a href="/accounts/delete?i={{$i}}">удалить</a></li>
+    <li>{{$a.Login}} {{$a.UUID}} <a href="/accounts/delete?i={{$i}}" class="delete-link">удалить</a></li>
     {{end}}
 </ul>
 {{end}}

@@ -6,7 +6,7 @@
 </form>
 <ul>
     {{range $i, $a := .Attachments}}
-    <li>{{$a.Name}} {{$a.Macro}} <a href="/attachments/delete?i={{$i}}">удалить</a></li>
+    <li>{{$a.Name}} {{$a.Macro}} <a href="/attachments/delete?i={{$i}}" class="delete-link">удалить</a></li>
     {{end}}
 </ul>
 {{end}}

@@ -15,7 +15,21 @@ import (
 //go:embed web/templates/*.html
 var templateFS embed.FS
 
-var tmpl = template.Must(template.ParseFS(templateFS, "web/templates/*.html"))
+//go:embed web/static/*
+var staticFS embed.FS
+
+var (
+	templates = map[string]*template.Template{}
+	loginTmpl *template.Template
+)
+
+func init() {
+	pages := []string{"dashboard", "emails", "macros", "attachments", "api-rules", "proxies", "accounts", "settings"}
+	for _, p := range pages {
+		templates[p] = template.Must(template.ParseFS(templateFS, "web/templates/layout.html", "web/templates/"+p+".html"))
+	}
+	loginTmpl = template.Must(template.ParseFS(templateFS, "web/templates/login.html"))
+}
 
 type App struct {
 	Domain    string
@@ -57,6 +71,7 @@ type Account struct {
 }
 
 func main() {
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 	http.HandleFunc("/", handleRoot)
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/logout", handleLogout)
@@ -88,6 +103,14 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
+func render(w http.ResponseWriter, name string, data any) {
+	if t, ok := templates[name]; ok {
+		t.ExecuteTemplate(w, "layout", data)
+		return
+	}
+	http.Error(w, "template not found", http.StatusInternalServerError)
+}
+
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
@@ -101,10 +124,10 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/dashboard", http.StatusFound)
 			return
 		}
-		tmpl.ExecuteTemplate(w, "login.html", map[string]any{"Error": "Неверные данные"})
+		loginTmpl.ExecuteTemplate(w, "login.html", map[string]any{"Error": "Неверные данные"})
 		return
 	}
-	tmpl.ExecuteTemplate(w, "login.html", nil)
+	loginTmpl.ExecuteTemplate(w, "login.html", nil)
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +151,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Title":       "Письмо",
 		"Attachments": app.Attachments,
 	}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "dashboard", data)
 }
 
 func handleSend(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +163,7 @@ func handleEmails(w http.ResponseWriter, r *http.Request) {
 		"Title":  "База e-mail",
 		"Emails": app.Emails,
 	}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "emails", data)
 }
 
 func handleEmailsAdd(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +198,7 @@ func handleEmailsDelete(w http.ResponseWriter, r *http.Request) {
 
 func handleMacros(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{"Title": "Макросы", "Macros": app.Macros}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "macros", data)
 }
 
 func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +219,7 @@ func handleMacrosDelete(w http.ResponseWriter, r *http.Request) {
 
 func handleAttachments(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{"Title": "Аттачи", "Attachments": app.Attachments}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "attachments", data)
 }
 
 func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +250,7 @@ func handleAttachmentsDelete(w http.ResponseWriter, r *http.Request) {
 
 func handleProxies(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{"Title": "Прокси", "Proxies": app.Proxies}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "proxies", data)
 }
 
 func handleProxiesAdd(w http.ResponseWriter, r *http.Request) {
@@ -263,7 +286,7 @@ func handleProxiesDelete(w http.ResponseWriter, r *http.Request) {
 
 func handleAccounts(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{"Title": "Аккаунты API", "Accounts": app.Accounts}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "accounts", data)
 }
 
 func handleAccountsAdd(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +321,7 @@ func handleAccountsDelete(w http.ResponseWriter, r *http.Request) {
 
 func handleAPIRules(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{"Title": "API правила", "APIRules": app.APIRules}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "api-rules", data)
 }
 
 func handleAPIRulesSave(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +335,7 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		"Domain":    app.Domain,
 		"UserAgent": app.UserAgent,
 	}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "settings", data)
 }
 
 func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
@@ -331,7 +354,7 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"UserAgent": app.UserAgent,
 		"Message":   "Сохранено",
 	}
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	render(w, "settings", data)
 }
 
 func parseEmail(line string) (EmailEntry, bool) {

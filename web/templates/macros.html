@@ -6,7 +6,7 @@
 </form>
 <ul>
     {{range $i, $m := .Macros}}
-    <li>{{$m}} <a href="/macros/delete?i={{$i}}">удалить</a></li>
+    <li>{{$m}} <a href="/macros/delete?i={{$i}}" class="delete-link">удалить</a></li>
     {{end}}
 </ul>
 {{end}}

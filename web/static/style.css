@@ -1,0 +1,11 @@
+body {font-family: Arial, sans-serif; margin:20px;}
+nav {margin-bottom:10px;}
+nav a {margin-right:8px; text-decoration:none; color:#333; padding:4px 6px; border-radius:4px;}
+nav a.active {background:#e0e0e0;}
+form {margin-top:10px;}
+ul {list-style: none; padding-left:0;}
+li {margin:4px 0;}
+textarea {width:100%; max-width:600px;}
+table {border-collapse: collapse; margin-top:10px;}
+td, th {border:1px solid #ccc; padding:4px 6px;}
+.delete-link {color:#c00;}
