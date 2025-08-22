@@ -57,6 +57,8 @@ type App struct {
 	SendPerAccount int
 	CycleAccounts  bool
 	CurrentAccount int
+
+	LastLog string
 }
 
 var app = &App{
@@ -89,6 +91,26 @@ type Account struct {
 	APIKey    string
 	UUID      string
 	Sent      int
+}
+
+func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte) (int, []byte, error) {
+	log.WriteString(fmt.Sprintf("%s %s\n", req.Method, req.URL.String()))
+	for k, v := range req.Header {
+		log.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ",")))
+	}
+	if len(body) > 0 {
+		log.WriteString("Body:\n" + string(body) + "\n")
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.WriteString("Error: " + err.Error() + "\n")
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	log.WriteString(fmt.Sprintf("Response %d\n%s\n", resp.StatusCode, string(respBody)))
+	return resp.StatusCode, respBody, nil
 }
 
 func main() {
@@ -172,6 +194,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
 		"Title":       "Письмо",
 		"Attachments": app.Attachments,
+		"Log":         app.LastLog,
 	}
 	if msg := r.URL.Query().Get("msg"); msg != "" {
 		data["Message"] = msg
@@ -197,7 +220,9 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := sendEmail(subject, body, atts); err != nil {
+	logs, err := sendEmail(subject, body, atts)
+	app.LastLog = logs
+	if err != nil {
 		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape(err.Error()), http.StatusFound)
 		return
 	}
@@ -478,7 +503,7 @@ func parseAccount(line string) (Account, bool) {
 	}, true
 }
 
-func checkAccount(acc Account) error {
+func checkAccount(acc Account, log *strings.Builder) error {
 	url := fmt.Sprintf("https://%s/api/mobile/v1/reset_fresh?app_state=active&uuid=%s", app.Domain, acc.UUID)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Host", app.Domain)
@@ -488,28 +513,26 @@ func checkAccount(acc Account) error {
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Language", "ru-RU;q=1, en-RU;q=0.9")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	status, body, err := doLoggedRequest(log, req, nil)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("код %d", resp.StatusCode)
+	if status != http.StatusOK {
+		return fmt.Errorf("код %d", status)
 	}
 	var res struct {
 		Status struct {
 			Status int `json:"status"`
 		} `json:"status"`
 	}
-	json.NewDecoder(resp.Body).Decode(&res)
+	json.Unmarshal(body, &res)
 	if res.Status.Status != 1 {
 		return fmt.Errorf("аккаунт не активен")
 	}
 	return nil
 }
 
-func generateOperationID(acc Account) (string, error) {
+func generateOperationID(acc Account, log *strings.Builder) (string, error) {
 	url := fmt.Sprintf("https://%s/api/mobile/v2/generate_operation_id?app_state=foreground&uuid=%s&client=iphone", app.Domain, acc.UUID)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Host", app.Domain)
@@ -521,37 +544,36 @@ func generateOperationID(acc Account) (string, error) {
 	req.Header.Set("Accept-Language", "ru-RU;q=1")
 	req.Header.Set("Content-Length", "0")
 	req.Header.Set("Connection", "close")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	status, body, err := doLoggedRequest(log, req, nil)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("код %d", resp.StatusCode)
+	if status != http.StatusOK {
+		return "", fmt.Errorf("код %d", status)
 	}
 	var res struct {
 		OperationID string `json:"operation_id"`
 	}
-	json.NewDecoder(resp.Body).Decode(&res)
+	json.Unmarshal(body, &res)
 	if res.OperationID == "" {
 		return "", fmt.Errorf("нет operation_id")
 	}
 	return res.OperationID, nil
 }
 
-func sendEmail(subject, body string, atts []Attachment) error {
+func sendEmail(subject, body string, atts []Attachment) (string, error) {
+	var log strings.Builder
 	if len(app.Accounts) == 0 {
-		return fmt.Errorf("нет аккаунтов")
+		return log.String(), fmt.Errorf("нет аккаунтов")
 	}
 	if len(app.Emails) == 0 {
-		return fmt.Errorf("нет получателей")
+		return log.String(), fmt.Errorf("нет получателей")
 	}
 
 	// choose account considering send limits
 	idx := app.CurrentAccount
 	if idx >= len(app.Accounts) {
-		return fmt.Errorf("аккаунты закончились")
+		return log.String(), fmt.Errorf("аккаунты закончились")
 	}
 	if app.Accounts[idx].Sent >= app.SendPerAccount {
 		idx++
@@ -559,7 +581,7 @@ func sendEmail(subject, body string, atts []Attachment) error {
 			if app.CycleAccounts {
 				idx = 0
 			} else {
-				return fmt.Errorf("аккаунты закончились")
+				return log.String(), fmt.Errorf("аккаунты закончились")
 			}
 		}
 		app.CurrentAccount = idx
@@ -567,19 +589,19 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	acc := &app.Accounts[app.CurrentAccount]
 	to := app.Emails[0].Email
 
-	if err := checkAccount(*acc); err != nil {
-		return err
+	if err := checkAccount(*acc, &log); err != nil {
+		return log.String(), err
 	}
-	opID, err := generateOperationID(*acc)
+	opID, err := generateOperationID(*acc, &log)
 	if err != nil {
-		return err
+		return log.String(), err
 	}
 
 	var attIDs []string
 	for _, a := range atts {
-		_, url, err := uploadAttachment(*acc, a.Path)
+		_, url, err := uploadAttachment(*acc, a.Path, &log)
 		if err != nil {
-			return err
+			return log.String(), err
 		}
 		attIDs = append(attIDs, url)
 	}
@@ -607,23 +629,21 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Connection", "close")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	status, respBody, err := doLoggedRequest(&log, req, b)
 	if err != nil {
-		return err
+		return log.String(), err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("код %d", resp.StatusCode)
+	if status != http.StatusOK {
+		return log.String(), fmt.Errorf("код %d", status)
 	}
 	var res struct {
 		Status struct {
 			Status int `json:"status"`
 		} `json:"status"`
 	}
-	json.NewDecoder(resp.Body).Decode(&res)
+	json.Unmarshal(respBody, &res)
 	if res.Status.Status != 1 {
-		return fmt.Errorf("отправка не удалась")
+		return log.String(), fmt.Errorf("отправка не удалась")
 	}
 	acc.Sent++
 	if acc.Sent >= app.SendPerAccount {
@@ -634,10 +654,10 @@ func sendEmail(subject, body string, atts []Attachment) error {
 			}
 		}
 	}
-	return nil
+	return log.String(), nil
 }
 
-func uploadAttachment(acc Account, path string) (string, string, error) {
+func uploadAttachment(acc Account, path string, log *strings.Builder) (string, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", "", err
@@ -654,21 +674,23 @@ func uploadAttachment(acc Account, path string) (string, string, error) {
 	io.Copy(part, file)
 	writer.Close()
 
+	bodyBytes := buf.Bytes()
 	url := fmt.Sprintf("https://%s/api/mobile/v1/upload?app_state=foreground&uuid=%s&client=iphone", app.Domain, acc.UUID)
-	req, _ := http.NewRequest("POST", url, &buf)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	status, respBody, err := doLoggedRequest(log, req, bodyBytes)
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	if status != http.StatusOK {
+		return "", "", fmt.Errorf("код %d", status)
+	}
 	var res struct {
 		ID  string `json:"id"`
 		URL string `json:"url"`
 	}
-	json.NewDecoder(resp.Body).Decode(&res)
+	json.Unmarshal(respBody, &res)
 	return res.ID, res.URL, nil
 }
