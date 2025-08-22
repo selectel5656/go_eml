@@ -20,4 +20,35 @@ document.addEventListener('DOMContentLoaded', () => {
     typeSel.addEventListener('change', toggle);
     toggle();
   }
+
+  const macroType = document.getElementById('macro-type');
+  if (macroType) {
+    const counter = document.getElementById('counter-fields');
+    const random = document.getElementById('random-fields');
+    const list = document.getElementById('list-fields');
+    const multi = document.getElementById('multi-fields');
+    const toggle = () => {
+      const v = macroType.value;
+      counter.style.display = v === 'counter' ? 'block' : 'none';
+      random.style.display = v === 'random' ? 'block' : 'none';
+      list.style.display = v === 'list' ? 'block' : 'none';
+      multi.style.display = v === 'multi' ? 'block' : 'none';
+    };
+    macroType.addEventListener('change', toggle);
+    toggle();
+  }
+
+  const prog = document.getElementById('send-progress');
+  if (prog) {
+    setInterval(() => {
+      fetch('/progress').then(r => r.json()).then(d => {
+        prog.max = d.total;
+        prog.value = d.sent;
+        document.getElementById('progress-text').textContent = `${d.sent}/${d.total} (${d.processing} в очереди)`;
+        const ec = document.getElementById('error-count');
+        ec.textContent = d.errors;
+        document.getElementById('error-download').style.display = d.errors > 0 ? 'inline' : 'none';
+      });
+    }, 1000);
+  }
 });

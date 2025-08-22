@@ -10,11 +10,11 @@
     <textarea name="body" rows="5"></textarea>
 
     <label>Аттачи:</label>
-    <select name="attach" multiple size="3">
+    <div class="att-list">
         {{range $i, $a := .Attachments}}
-        <option value="{{$i}}">{{$a.Name}}</option>
+        <label><input type="checkbox" name="attach" value="{{$i}}"> {{$a.Name}}</label><br>
         {{end}}
-    </select>
+    </div>
     {{range $a := .Attachments}}
         {{if $a.Inline}}
         <div class="inline-hint">{{$a.Name}} макрос: {{$a.InlineMacro}}<br><code>&lt;img src="data:{{$a.Mime}};base64,{{$a.InlineMacro}}"&gt;</code></div>
@@ -38,6 +38,14 @@
 <form method="POST" action="/send/stop">
     <input type="submit" value="Стоп" {{if not .Sending}}disabled{{end}}>
 </form>
+<form method="POST" action="/queue/reset">
+    <input type="submit" value="Сброс очереди">
+</form>
+
+<label>Прогресс:</label>
+<progress id="send-progress" value="0" max="100"></progress>
+<span id="progress-text">0/0</span>
+<div>Ошибки: <span id="error-count">0</span> <a id="error-download" href="/errors" style="display:none">скачать</a></div>
 
 <label>Лог запросов:</label>
 <textarea class="log" readonly>{{.Log}}</textarea>

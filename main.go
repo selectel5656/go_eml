@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"math/rand"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,6 +80,7 @@ type App struct {
 	Stop    bool
 
 	LastLog string
+	Errors  []string
 }
 
 var app = &App{
@@ -127,6 +129,8 @@ type Macro struct {
 	Values     []string
 	Sequential bool
 	Index      int
+	Expr       string
+	Encoding   string
 }
 
 type Proxy struct {
@@ -160,7 +164,7 @@ func initDB() {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS settings (name VARCHAR(255) PRIMARY KEY, value TEXT)`,
 		`CREATE TABLE IF NOT EXISTS emails (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), email VARCHAR(255), sent TINYINT(1))`,
-		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, vals TEXT, sequential TINYINT(1), idx INT)`,
+		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, vals TEXT, sequential TINYINT(1), idx INT, expr TEXT, encoding VARCHAR(20))`,
 		`CREATE TABLE IF NOT EXISTS attachments (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), macro VARCHAR(255), path TEXT, inline TINYINT(1), inline_macro VARCHAR(255), mime VARCHAR(100))`,
 		`CREATE TABLE IF NOT EXISTS proxies (address VARCHAR(255) PRIMARY KEY, alive TINYINT(1), used TINYINT(1))`,
 		`CREATE TABLE IF NOT EXISTS accounts (login VARCHAR(255) PRIMARY KEY, password VARCHAR(255), first_name VARCHAR(255), last_name VARCHAR(255), api_key TEXT, uuid VARCHAR(255), sent INT, proxy VARCHAR(255))`,
@@ -260,19 +264,21 @@ func loadEmails() {
 }
 
 func loadMacros() {
-	rows, err := db.Query("SELECT name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx FROM macros")
+	rows, err := db.Query("SELECT name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx,expr,encoding FROM macros")
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m Macro
-		var vals string
+		var vals, expr, enc string
 		var seq, idx int
-		rows.Scan(&m.Name, &m.Type, &m.Counter, &m.Step, &m.Chars, &m.Min, &m.Max, &m.Every, &m.Used, &m.Last, &vals, &seq, &idx)
+		rows.Scan(&m.Name, &m.Type, &m.Counter, &m.Step, &m.Chars, &m.Min, &m.Max, &m.Every, &m.Used, &m.Last, &vals, &seq, &idx, &expr, &enc)
 		json.Unmarshal([]byte(vals), &m.Values)
 		m.Sequential = seq == 1
 		m.Index = idx
+		m.Expr = expr
+		m.Encoding = enc
 		app.Macros = append(app.Macros, m)
 	}
 }
@@ -435,6 +441,9 @@ func main() {
 	http.HandleFunc("/dashboard", requireAuth(handleDashboard))
 	http.HandleFunc("/send", requireAuth(handleSend))
 	http.HandleFunc("/send/stop", requireAuth(handleSendStop))
+	http.HandleFunc("/progress", requireAuth(handleProgress))
+	http.HandleFunc("/errors", requireAuth(handleErrorsDownload))
+	http.HandleFunc("/queue/reset", requireAuth(handleQueueReset))
 	http.HandleFunc("/emails", requireAuth(handleEmails))
 	http.HandleFunc("/emails/add", requireAuth(handleEmailsAdd))
 	http.HandleFunc("/emails/upload", requireAuth(handleEmailsUpload))
@@ -565,6 +574,48 @@ func handleSendStop(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dashboard", http.StatusFound)
 }
 
+func handleQueueReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		emailMu.Lock()
+		for i := range app.Emails {
+			app.Emails[i].Processing = false
+		}
+		emailMu.Unlock()
+	}
+	http.Redirect(w, r, "/dashboard", http.StatusFound)
+}
+
+func handleProgress(w http.ResponseWriter, r *http.Request) {
+	emailMu.Lock()
+	total := len(app.Emails)
+	sent := 0
+	processing := 0
+	for _, e := range app.Emails {
+		if e.Sent {
+			sent++
+		}
+		if e.Processing {
+			processing++
+		}
+	}
+	emailMu.Unlock()
+	res := map[string]any{
+		"total":      total,
+		"sent":       sent,
+		"processing": processing,
+		"errors":     len(app.Errors),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+func handleErrorsDownload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	for _, e := range app.Errors {
+		fmt.Fprintln(w, e)
+	}
+}
+
 func nextBatch(rcount int) []int {
 	emailMu.Lock()
 	defer emailMu.Unlock()
@@ -614,6 +665,7 @@ func worker(subject, body string, atts []Attachment, rcount int, method string, 
 				app.LastLog += "\n--- test ---\n" + logs
 			}
 		} else {
+			app.Errors = append(app.Errors, logs+"\n"+err.Error())
 			for _, idx := range idxs {
 				app.Emails[idx].Processing = false
 			}
@@ -623,6 +675,7 @@ func worker(subject, body string, atts []Attachment, rcount int, method string, 
 }
 
 func massSend(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) {
+	app.Errors = nil
 	var wg sync.WaitGroup
 	for i := 0; i < app.Threads; i++ {
 		wg.Add(1)
@@ -732,6 +785,9 @@ func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		mac.Sequential = seq
+	case "multi":
+		mac.Expr = r.FormValue("expr")
+		mac.Encoding = r.FormValue("encoding")
 	}
 	app.Macros = append(app.Macros, mac)
 	vals, _ := json.Marshal(mac.Values)
@@ -739,8 +795,8 @@ func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
 	if mac.Sequential {
 		seq = 1
 	}
-	db.Exec("INSERT INTO macros(name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-		mac.Name, mac.Type, mac.Counter, mac.Step, mac.Chars, mac.Min, mac.Max, mac.Every, mac.Used, mac.Last, string(vals), seq, mac.Index)
+	db.Exec("INSERT INTO macros(name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx,expr,encoding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		mac.Name, mac.Type, mac.Counter, mac.Step, mac.Chars, mac.Min, mac.Max, mac.Every, mac.Used, mac.Last, string(vals), seq, mac.Index, mac.Expr, mac.Encoding)
 	http.Redirect(w, r, "/macros", http.StatusFound)
 }
 
@@ -800,17 +856,15 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 				extra = min + rand.Intn(max-min+1)
 			}
 			content := replaceMacros(r.FormValue("page_content"))
-			if extra > 0 {
-				if doc, err := document.Open(path); err == nil {
-					for i := 0; i < extra; i++ {
-						para := doc.AddParagraph()
-						para.Properties().SetPageBreakBefore(true)
-						if i == extra-1 {
-							para.AddRun().AddText(content)
-						}
+			if doc, err := document.Open(path); err == nil {
+				for i := 0; i < extra; i++ {
+					para := doc.AddParagraph()
+					para.Properties().SetPageBreakBefore(true)
+					if i == extra-1 {
+						para.AddRun().AddText(content)
 					}
-					doc.SaveToFile(path)
 				}
+				doc.SaveToFile(path)
 			}
 			if r.FormValue("convert_pdf") == "on" {
 				pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
@@ -1149,6 +1203,20 @@ func macroValue(m *Macro) string {
 			} else {
 				m.Last = ""
 			}
+		case "multi":
+			res := replaceMacros(m.Expr)
+			switch m.Encoding {
+			case "base64":
+				m.Last = base64.StdEncoding.EncodeToString([]byte(res))
+			case "qp":
+				var b bytes.Buffer
+				w := quotedprintable.NewWriter(&b)
+				w.Write([]byte(res))
+				w.Close()
+				m.Last = b.String()
+			default:
+				m.Last = res
+			}
 		}
 	}
 	m.Used++
@@ -1157,8 +1225,8 @@ func macroValue(m *Macro) string {
 	if m.Sequential {
 		seq = 1
 	}
-	db.Exec("UPDATE macros SET counter=?,step=?,chars=?,min=?,max=?,every=?,used=?,last=?,vals=?,sequential=?,idx=? WHERE name=?",
-		m.Counter, m.Step, m.Chars, m.Min, m.Max, m.Every, m.Used, m.Last, string(vals), seq, m.Index, m.Name)
+	db.Exec("UPDATE macros SET counter=?,step=?,chars=?,min=?,max=?,every=?,used=?,last=?,vals=?,sequential=?,idx=?,expr=?,encoding=? WHERE name=?",
+		m.Counter, m.Step, m.Chars, m.Min, m.Max, m.Every, m.Used, m.Last, string(vals), seq, m.Index, m.Expr, m.Encoding, m.Name)
 	return m.Last
 }
 
