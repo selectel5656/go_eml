@@ -10,7 +10,7 @@
 </form>
 <ul>
     {{range $i, $p := .Proxies}}
-    <li>{{$p}} <a href="/proxies/delete?i={{$i}}" class="delete-link">удалить</a></li>
+    <li>{{$p.Address}} - {{if $p.Alive}}ok{{else}}fail{{end}} <a href="/proxies/delete?i={{$i}}" class="delete-link">удалить</a></li>
     {{end}}
 </ul>
 {{end}}

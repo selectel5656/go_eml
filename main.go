@@ -52,7 +52,7 @@ type App struct {
 	Emails      []EmailEntry
 	Macros      []string
 	Attachments []Attachment
-	Proxies     []string
+	Proxies     []Proxy
 	Accounts    []Account
 	APIRules    string
 
@@ -85,6 +85,12 @@ type Attachment struct {
 	Mime        string
 }
 
+type Proxy struct {
+	Address string
+	Alive   bool
+	Used    bool
+}
+
 type Account struct {
 	Login     string
 	Password  string
@@ -93,9 +99,44 @@ type Account struct {
 	APIKey    string
 	UUID      string
 	Sent      int
+	Proxy     string
 }
 
-func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte) (int, []byte, error) {
+func checkProxy(addr string) bool {
+	proxyURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		return false
+	}
+	tr := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	resp, err := client.Get("https://api.ipify.org?format=json")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func getProxy() string {
+	for i := range app.Proxies {
+		if app.Proxies[i].Alive && !app.Proxies[i].Used {
+			app.Proxies[i].Used = true
+			return app.Proxies[i].Address
+		}
+	}
+	for i := range app.Proxies {
+		app.Proxies[i].Used = false
+	}
+	for i := range app.Proxies {
+		if app.Proxies[i].Alive {
+			app.Proxies[i].Used = true
+			return app.Proxies[i].Address
+		}
+	}
+	return ""
+}
+
+func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte, proxy string) (int, []byte, error) {
 	log.WriteString(fmt.Sprintf("%s %s\n", req.Method, req.URL.String()))
 	for k, v := range req.Header {
 		log.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ",")))
@@ -103,7 +144,13 @@ func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte) (int,
 	if len(body) > 0 {
 		log.WriteString("Body:\n" + string(body) + "\n")
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	tr := &http.Transport{}
+	if proxy != "" {
+		if purl, err := url.Parse("http://" + proxy); err == nil {
+			tr.Proxy = http.ProxyURL(purl)
+		}
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.WriteString("Error: " + err.Error() + "\n")
@@ -360,7 +407,7 @@ func handleProxies(w http.ResponseWriter, r *http.Request) {
 
 func handleProxiesAdd(w http.ResponseWriter, r *http.Request) {
 	if p := r.FormValue("proxy"); p != "" {
-		app.Proxies = append(app.Proxies, p)
+		app.Proxies = append(app.Proxies, Proxy{Address: p, Alive: checkProxy(p)})
 	}
 	http.Redirect(w, r, "/proxies", http.StatusFound)
 }
@@ -373,7 +420,7 @@ func handleProxiesUpload(w http.ResponseWriter, r *http.Request) {
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line != "" {
-				app.Proxies = append(app.Proxies, line)
+				app.Proxies = append(app.Proxies, Proxy{Address: line, Alive: checkProxy(line)})
 			}
 		}
 	}
@@ -530,7 +577,7 @@ func checkAccount(acc Account, log *strings.Builder) error {
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Language", "ru-RU;q=1, en-RU;q=0.9")
-	status, body, err := doLoggedRequest(log, req, nil)
+	status, body, err := doLoggedRequest(log, req, nil, acc.Proxy)
 	if err != nil {
 		return err
 	}
@@ -561,7 +608,7 @@ func generateOperationID(acc Account, log *strings.Builder) (string, error) {
 	req.Header.Set("Accept-Language", "ru-RU;q=1")
 	req.Header.Set("Content-Length", "0")
 	req.Header.Set("Connection", "close")
-	status, body, err := doLoggedRequest(log, req, nil)
+	status, body, err := doLoggedRequest(log, req, nil, acc.Proxy)
 	if err != nil {
 		return "", err
 	}
@@ -604,6 +651,9 @@ func sendEmail(subject, body string, atts []Attachment) (string, error) {
 		app.CurrentAccount = idx
 	}
 	acc := &app.Accounts[app.CurrentAccount]
+	if acc.Proxy == "" {
+		acc.Proxy = getProxy()
+	}
 	to := app.Emails[0].Email
 
 	if err := checkAccount(*acc, &log); err != nil {
@@ -646,7 +696,7 @@ func sendEmail(subject, body string, atts []Attachment) (string, error) {
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Connection", "close")
-	status, respBody, err := doLoggedRequest(&log, req, b)
+	status, respBody, err := doLoggedRequest(&log, req, b, acc.Proxy)
 	if err != nil {
 		return log.String(), err
 	}
@@ -698,7 +748,7 @@ func uploadAttachment(acc Account, path string, log *strings.Builder) (string, s
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	status, respBody, err := doLoggedRequest(log, req, bodyBytes)
+	status, respBody, err := doLoggedRequest(log, req, bodyBytes, acc.Proxy)
 	if err != nil {
 		return "", "", err
 	}
