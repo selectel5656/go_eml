@@ -2,14 +2,20 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed web/templates/*.html
@@ -151,11 +157,35 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"Title":       "Письмо",
 		"Attachments": app.Attachments,
 	}
+	if msg := r.URL.Query().Get("msg"); msg != "" {
+		data["Message"] = msg
+	}
+	if errMsg := r.URL.Query().Get("err"); errMsg != "" {
+		data["Error"] = errMsg
+	}
 	render(w, "dashboard", data)
 }
 
 func handleSend(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/dashboard", http.StatusFound)
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+		return
+	}
+	subject := r.FormValue("subject")
+	body := r.FormValue("body")
+	var atts []Attachment
+	for _, v := range r.Form["attach"] {
+		if i, err := strconv.Atoi(v); err == nil {
+			if i >= 0 && i < len(app.Attachments) {
+				atts = append(atts, app.Attachments[i])
+			}
+		}
+	}
+	if err := sendEmail(subject, body, atts); err != nil {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape(err.Error()), http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "/dashboard?msg="+url.QueryEscape("Письмо отправлено"), http.StatusFound)
 }
 
 func handleEmails(w http.ResponseWriter, r *http.Request) {
@@ -394,4 +424,90 @@ func parseAccount(line string) (Account, bool) {
 		APIKey:    parts[4],
 		UUID:      parts[5],
 	}, true
+}
+
+func sendEmail(subject, body string, atts []Attachment) error {
+	if len(app.Accounts) == 0 {
+		return fmt.Errorf("нет аккаунтов")
+	}
+	if len(app.Emails) == 0 {
+		return fmt.Errorf("нет получателей")
+	}
+	acc := app.Accounts[0]
+	to := app.Emails[0].Email
+
+	var attIDs []string
+	for _, a := range atts {
+		_, url, err := uploadAttachment(acc, a.Path)
+		if err != nil {
+			return err
+		}
+		attIDs = append(attIDs, url)
+	}
+
+	opID := strconv.FormatInt(time.Now().UnixNano(), 10)
+	payload := map[string]any{
+		"att_ids":       attIDs,
+		"attachesCount": len(attIDs),
+		"send":          body,
+		"ttype":         "html",
+		"subj":          subject,
+		"operation_id":  opID,
+		"compose_check": "1",
+		"from_mailbox":  acc.Login,
+		"to":            to,
+		"from_name":     acc.FirstName,
+	}
+	b, _ := json.Marshal(payload)
+	url := fmt.Sprintf("https://%s/api/mobile/v1/send?app_state=foreground&uuid=%s", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", app.UserAgent)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("код %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func uploadAttachment(acc Account, path string) (string, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	writer.WriteField("filename", filepath.Base(path))
+	part, err := writer.CreateFormFile("attachment", filepath.Base(path))
+	if err != nil {
+		return "", "", err
+	}
+	io.Copy(part, file)
+	writer.Close()
+
+	url := fmt.Sprintf("https://%s/api/mobile/v1/upload?app_state=foreground&uuid=%s&client=iphone", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("POST", url, &buf)
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	var res struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+	return res.ID, res.URL, nil
 }

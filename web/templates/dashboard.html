@@ -1,15 +1,21 @@
 {{define "content"}}
 <h2>Письмо</h2>
+{{if .Message}}<div class="message">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
 <form method="POST" action="/send">
-    <label>Тема:</label><input type="text" name="subject"><br>
-    <label>Текст:</label><br>
-    <textarea name="body" rows="5" cols="60"></textarea><br>
+    <label>Тема:</label>
+    <input type="text" name="subject">
+
+    <label>Текст:</label>
+    <textarea name="body" rows="5"></textarea>
+
     <label>Аттачи:</label>
-    <select name="attachment">
-        {{range .Attachments}}
-        <option value="{{.Path}}">{{.Name}}</option>
+    <select name="attach" multiple size="3">
+        {{range $i, $a := .Attachments}}
+        <option value="{{$i}}">{{$a.Name}}</option>
         {{end}}
-    </select><br>
-    <input type="submit" value="Отправить (фейк)">
+    </select>
+
+    <input type="submit" value="Отправить">
 </form>
 {{end}}

@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8">
     <title>{{.Title}}</title>
-    <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <nav>
@@ -18,8 +18,9 @@
     <a href="/settings">Настройки</a>
     <a href="/logout">Выход</a>
 </nav>
-<hr>
+<div class="container">
 {{template "content" .}}
+</div>
 <script src="/static/app.js"></script>
 </body>
 </html>
