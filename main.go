@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"database/sql"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -21,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 //go:embed web/templates/*.html
@@ -34,6 +37,7 @@ var staticFiles fs.FS
 var (
 	templates = map[string]*template.Template{}
 	loginTmpl *template.Template
+	db        *sql.DB
 )
 
 func init() {
@@ -127,6 +131,163 @@ type Account struct {
 	Proxy     string
 }
 
+func initDB() {
+	var err error
+	db, err = sql.Open("sqlite3", "app.db")
+	if err != nil {
+		panic(err)
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`,
+		`CREATE TABLE IF NOT EXISTS emails (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT, sent INTEGER)`,
+		`CREATE TABLE IF NOT EXISTS macros (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, type TEXT, counter INTEGER, step INTEGER, chars TEXT, min INTEGER, max INTEGER, every INTEGER, used INTEGER, last TEXT, values TEXT, sequential INTEGER, idx INTEGER)`,
+		`CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, macro TEXT, path TEXT, inline INTEGER, inline_macro TEXT, mime TEXT)`,
+		`CREATE TABLE IF NOT EXISTS proxies (address TEXT PRIMARY KEY, alive INTEGER, used INTEGER)`,
+		`CREATE TABLE IF NOT EXISTS accounts (login TEXT PRIMARY KEY, password TEXT, first_name TEXT, last_name TEXT, api_key TEXT, uuid TEXT, sent INTEGER, proxy TEXT)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			panic(err)
+		}
+	}
+	loadSettings()
+	loadEmails()
+	loadMacros()
+	loadAttachments()
+	loadProxies()
+	loadAccounts()
+}
+
+func loadSettings() {
+	rows, err := db.Query("SELECT key, value FROM settings")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		rows.Scan(&k, &v)
+		switch k {
+		case "domain":
+			app.Domain = v
+		case "user_agent":
+			app.UserAgent = v
+		case "admin_pass":
+			app.AdminPass = v
+		case "send_per_account":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.SendPerAccount = n
+			}
+		case "cycle_accounts":
+			app.CycleAccounts = v == "1"
+		case "threads":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.Threads = n
+			}
+		case "api_rules":
+			app.APIRules = v
+		}
+	}
+	if app.AdminPass == "" {
+		app.AdminPass = "admin"
+	}
+}
+
+func saveSetting(k, v string) {
+	db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v)
+}
+
+func saveSettings() {
+	saveSetting("domain", app.Domain)
+	saveSetting("user_agent", app.UserAgent)
+	saveSetting("admin_pass", app.AdminPass)
+	saveSetting("send_per_account", strconv.Itoa(app.SendPerAccount))
+	if app.CycleAccounts {
+		saveSetting("cycle_accounts", "1")
+	} else {
+		saveSetting("cycle_accounts", "0")
+	}
+	saveSetting("threads", strconv.Itoa(app.Threads))
+	saveSetting("api_rules", app.APIRules)
+}
+
+func loadEmails() {
+	rows, err := db.Query("SELECT name,email,sent FROM emails")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e EmailEntry
+		var sent int
+		rows.Scan(&e.Name, &e.Email, &sent)
+		e.Sent = sent == 1
+		app.Emails = append(app.Emails, e)
+	}
+}
+
+func loadMacros() {
+	rows, err := db.Query("SELECT name,type,counter,step,chars,min,max,every,used,last,values,sequential,idx FROM macros")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m Macro
+		var values string
+		var seq, idx int
+		rows.Scan(&m.Name, &m.Type, &m.Counter, &m.Step, &m.Chars, &m.Min, &m.Max, &m.Every, &m.Used, &m.Last, &values, &seq, &idx)
+		json.Unmarshal([]byte(values), &m.Values)
+		m.Sequential = seq == 1
+		m.Index = idx
+		app.Macros = append(app.Macros, m)
+	}
+}
+
+func loadAttachments() {
+	rows, err := db.Query("SELECT name,macro,path,inline,inline_macro,mime FROM attachments")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var att Attachment
+		var inline int
+		rows.Scan(&att.Name, &att.Macro, &att.Path, &inline, &att.InlineMacro, &att.Mime)
+		att.Inline = inline == 1
+		app.Attachments = append(app.Attachments, att)
+	}
+}
+
+func loadProxies() {
+	rows, err := db.Query("SELECT address,alive,used FROM proxies")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p Proxy
+		var alive, used int
+		rows.Scan(&p.Address, &alive, &used)
+		p.Alive = alive == 1
+		p.Used = used == 1
+		app.Proxies = append(app.Proxies, p)
+	}
+}
+
+func loadAccounts() {
+	rows, err := db.Query("SELECT login,password,first_name,last_name,api_key,uuid,sent,proxy FROM accounts")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a Account
+		rows.Scan(&a.Login, &a.Password, &a.FirstName, &a.LastName, &a.APIKey, &a.UUID, &a.Sent, &a.Proxy)
+		app.Accounts = append(app.Accounts, a)
+	}
+}
+
 func checkProxy(addr string) bool {
 	proxyURL, err := url.Parse("http://" + addr)
 	if err != nil {
@@ -146,15 +307,18 @@ func getProxy() string {
 	for i := range app.Proxies {
 		if app.Proxies[i].Alive && !app.Proxies[i].Used {
 			app.Proxies[i].Used = true
+			db.Exec("UPDATE proxies SET used=1 WHERE address=?", app.Proxies[i].Address)
 			return app.Proxies[i].Address
 		}
 	}
 	for i := range app.Proxies {
 		app.Proxies[i].Used = false
+		db.Exec("UPDATE proxies SET used=0 WHERE address=?", app.Proxies[i].Address)
 	}
 	for i := range app.Proxies {
 		if app.Proxies[i].Alive {
 			app.Proxies[i].Used = true
+			db.Exec("UPDATE proxies SET used=1 WHERE address=?", app.Proxies[i].Address)
 			return app.Proxies[i].Address
 		}
 	}
@@ -203,6 +367,7 @@ func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte, proxy
 }
 
 func main() {
+	initDB()
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
 	http.HandleFunc("/", handleRoot)
 	http.HandleFunc("/login", handleLogin)
@@ -366,6 +531,7 @@ func massSend(subject, body string, atts []Attachment, rcount int, method string
 		if err == nil {
 			for _, idx := range idxs {
 				app.Emails[idx].Sent = true
+				db.Exec("UPDATE emails SET sent=1 WHERE email=?", app.Emails[idx].Email)
 			}
 		} else {
 			break
@@ -385,6 +551,7 @@ func handleEmails(w http.ResponseWriter, r *http.Request) {
 func handleEmailsAdd(w http.ResponseWriter, r *http.Request) {
 	if e, ok := parseEmail(r.FormValue("email")); ok {
 		app.Emails = append(app.Emails, e)
+		db.Exec("INSERT INTO emails(name,email,sent) VALUES(?,?,0)", e.Name, e.Email)
 	}
 	http.Redirect(w, r, "/emails", http.StatusFound)
 }
@@ -397,6 +564,7 @@ func handleEmailsUpload(w http.ResponseWriter, r *http.Request) {
 		for scanner.Scan() {
 			if e, ok := parseEmail(scanner.Text()); ok {
 				app.Emails = append(app.Emails, e)
+				db.Exec("INSERT INTO emails(name,email,sent) VALUES(?,?,0)", e.Name, e.Email)
 			}
 		}
 	}
@@ -406,6 +574,7 @@ func handleEmailsUpload(w http.ResponseWriter, r *http.Request) {
 func handleEmailsDelete(w http.ResponseWriter, r *http.Request) {
 	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
 		if i >= 0 && i < len(app.Emails) {
+			db.Exec("DELETE FROM emails WHERE email=?", app.Emails[i].Email)
 			app.Emails = append(app.Emails[:i], app.Emails[i+1:]...)
 		}
 	}
@@ -416,6 +585,7 @@ func handleEmailsReset(w http.ResponseWriter, r *http.Request) {
 	for i := range app.Emails {
 		app.Emails[i].Sent = false
 	}
+	db.Exec("UPDATE emails SET sent=0")
 	http.Redirect(w, r, "/emails", http.StatusFound)
 }
 
@@ -470,12 +640,20 @@ func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
 		mac.Sequential = seq
 	}
 	app.Macros = append(app.Macros, mac)
+	vals, _ := json.Marshal(mac.Values)
+	seq := 0
+	if mac.Sequential {
+		seq = 1
+	}
+	db.Exec("INSERT INTO macros(name,type,counter,step,chars,min,max,every,used,last,values,sequential,idx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		mac.Name, mac.Type, mac.Counter, mac.Step, mac.Chars, mac.Min, mac.Max, mac.Every, mac.Used, mac.Last, string(vals), seq, mac.Index)
 	http.Redirect(w, r, "/macros", http.StatusFound)
 }
 
 func handleMacrosDelete(w http.ResponseWriter, r *http.Request) {
 	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
 		if i >= 0 && i < len(app.Macros) {
+			db.Exec("DELETE FROM macros WHERE name=?", app.Macros[i].Name)
 			app.Macros = append(app.Macros[:i], app.Macros[i+1:]...)
 		}
 	}
@@ -516,6 +694,11 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 			att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
 		}
 		app.Attachments = append(app.Attachments, att)
+		in := 0
+		if att.Inline {
+			in = 1
+		}
+		db.Exec("INSERT INTO attachments(name,macro,path,inline,inline_macro,mime) VALUES(?,?,?,?,?,?)", att.Name, att.Macro, att.Path, in, att.InlineMacro, att.Mime)
 	}
 	http.Redirect(w, r, "/attachments", http.StatusFound)
 }
@@ -524,6 +707,7 @@ func handleAttachmentsDelete(w http.ResponseWriter, r *http.Request) {
 	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
 		if i >= 0 && i < len(app.Attachments) {
 			os.Remove(app.Attachments[i].Path)
+			db.Exec("DELETE FROM attachments WHERE macro=?", app.Attachments[i].Macro)
 			app.Attachments = append(app.Attachments[:i], app.Attachments[i+1:]...)
 		}
 	}
@@ -537,7 +721,13 @@ func handleProxies(w http.ResponseWriter, r *http.Request) {
 
 func handleProxiesAdd(w http.ResponseWriter, r *http.Request) {
 	if p := r.FormValue("proxy"); p != "" {
-		app.Proxies = append(app.Proxies, Proxy{Address: p, Alive: checkProxy(p)})
+		alive := checkProxy(p)
+		app.Proxies = append(app.Proxies, Proxy{Address: p, Alive: alive})
+		a := 0
+		if alive {
+			a = 1
+		}
+		db.Exec("INSERT INTO proxies(address,alive,used) VALUES(?,?,0)", p, a)
 	}
 	http.Redirect(w, r, "/proxies", http.StatusFound)
 }
@@ -550,7 +740,13 @@ func handleProxiesUpload(w http.ResponseWriter, r *http.Request) {
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line != "" {
-				app.Proxies = append(app.Proxies, Proxy{Address: line, Alive: checkProxy(line)})
+				alive := checkProxy(line)
+				app.Proxies = append(app.Proxies, Proxy{Address: line, Alive: alive})
+				a := 0
+				if alive {
+					a = 1
+				}
+				db.Exec("INSERT INTO proxies(address,alive,used) VALUES(?,?,0)", line, a)
 			}
 		}
 	}
@@ -560,6 +756,7 @@ func handleProxiesUpload(w http.ResponseWriter, r *http.Request) {
 func handleProxiesDelete(w http.ResponseWriter, r *http.Request) {
 	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
 		if i >= 0 && i < len(app.Proxies) {
+			db.Exec("DELETE FROM proxies WHERE address=?", app.Proxies[i].Address)
 			app.Proxies = append(app.Proxies[:i], app.Proxies[i+1:]...)
 		}
 	}
@@ -574,6 +771,7 @@ func handleAccounts(w http.ResponseWriter, r *http.Request) {
 func handleAccountsAdd(w http.ResponseWriter, r *http.Request) {
 	if a, ok := parseAccount(r.FormValue("account")); ok {
 		app.Accounts = append(app.Accounts, a)
+		db.Exec("INSERT INTO accounts(login,password,first_name,last_name,api_key,uuid,sent,proxy) VALUES(?,?,?,?,?,?,?,?)", a.Login, a.Password, a.FirstName, a.LastName, a.APIKey, a.UUID, a.Sent, a.Proxy)
 	}
 	http.Redirect(w, r, "/accounts", http.StatusFound)
 }
@@ -586,6 +784,7 @@ func handleAccountsUpload(w http.ResponseWriter, r *http.Request) {
 		for scanner.Scan() {
 			if a, ok := parseAccount(scanner.Text()); ok {
 				app.Accounts = append(app.Accounts, a)
+				db.Exec("INSERT INTO accounts(login,password,first_name,last_name,api_key,uuid,sent,proxy) VALUES(?,?,?,?,?,?,?,?)", a.Login, a.Password, a.FirstName, a.LastName, a.APIKey, a.UUID, a.Sent, a.Proxy)
 			}
 		}
 	}
@@ -595,6 +794,7 @@ func handleAccountsUpload(w http.ResponseWriter, r *http.Request) {
 func handleAccountsDelete(w http.ResponseWriter, r *http.Request) {
 	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
 		if i >= 0 && i < len(app.Accounts) {
+			db.Exec("DELETE FROM accounts WHERE login=?", app.Accounts[i].Login)
 			app.Accounts = append(app.Accounts[:i], app.Accounts[i+1:]...)
 		}
 	}
@@ -606,6 +806,7 @@ func handleAccountsReset(w http.ResponseWriter, r *http.Request) {
 		app.Accounts[i].Sent = 0
 	}
 	app.CurrentAccount = 0
+	db.Exec("UPDATE accounts SET sent=0")
 	http.Redirect(w, r, "/accounts", http.StatusFound)
 }
 
@@ -616,6 +817,7 @@ func handleAPIRules(w http.ResponseWriter, r *http.Request) {
 
 func handleAPIRulesSave(w http.ResponseWriter, r *http.Request) {
 	app.APIRules = r.FormValue("rules")
+	saveSettings()
 	http.Redirect(w, r, "/api-rules", http.StatusFound)
 }
 
@@ -652,6 +854,7 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	if p := r.FormValue("password"); p != "" {
 		app.AdminPass = p
 	}
+	saveSettings()
 	data := map[string]any{
 		"Title":          "Настройки",
 		"Domain":         app.Domain,
@@ -749,6 +952,13 @@ func macroValue(m *Macro) string {
 		}
 	}
 	m.Used++
+	vals, _ := json.Marshal(m.Values)
+	seq := 0
+	if m.Sequential {
+		seq = 1
+	}
+	db.Exec("UPDATE macros SET counter=?,step=?,chars=?,min=?,max=?,every=?,used=?,last=?,values=?,sequential=?,idx=? WHERE name=?",
+		m.Counter, m.Step, m.Chars, m.Min, m.Max, m.Every, m.Used, m.Last, string(vals), seq, m.Index, m.Name)
 	return m.Last
 }
 
@@ -879,6 +1089,7 @@ func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry,
 	acc := &app.Accounts[app.CurrentAccount]
 	if acc.Proxy == "" {
 		acc.Proxy = getProxy()
+		db.Exec("UPDATE accounts SET proxy=? WHERE login=?", acc.Proxy, acc.Login)
 	}
 
 	if err := checkAccount(*acc, &log); err != nil {
@@ -966,6 +1177,7 @@ func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry,
 		return log.String(), fmt.Errorf("отправка не удалась")
 	}
 	acc.Sent++
+	db.Exec("UPDATE accounts SET sent=?, proxy=? WHERE login=?", acc.Sent, acc.Proxy, acc.Login)
 	if acc.Sent >= app.SendPerAccount {
 		app.CurrentAccount++
 		if app.CurrentAccount >= len(app.Accounts) {
