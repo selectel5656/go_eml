@@ -1,12 +1,28 @@
 {{define "content"}}
 <h2>Макросы</h2>
 <form method="POST" action="/macros/add">
-    <input type="text" name="macro" placeholder="Имя макроса">
+    <input type="text" name="name" placeholder="Имя макроса">
+    <select name="type">
+        <option value="counter">Счётчик</option>
+        <option value="random">Рандом</option>
+    </select>
+    <input type="number" name="start" placeholder="Старт">
+    <input type="number" name="step" placeholder="Шаг">
+    <input type="text" name="chars" placeholder="Символы">
+    <input type="number" name="min" placeholder="Мин">
+    <input type="number" name="max" placeholder="Макс">
+    <input type="number" name="every" placeholder="Каждые N писем" value="1">
     <input type="submit" value="Добавить">
 </form>
-<ul>
+<table>
+    <tr><th>Макрос</th><th>Тип</th><th>Текущее значение</th><th></th></tr>
     {{range $i, $m := .Macros}}
-    <li>{{$m}} <a href="/macros/delete?i={{$i}}" class="delete-link">удалить</a></li>
+    <tr>
+        <td>{{printf "{{$%s}}" $m.Name}}</td>
+        <td>{{$m.Type}}</td>
+        <td>{{$m.Last}}</td>
+        <td><a href="/macros/delete?i={{$i}}" class="delete-link">удалить</a></td>
+    </tr>
     {{end}}
-</ul>
+</table>
 {{end}}

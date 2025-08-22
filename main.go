@@ -6,11 +6,13 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
+	"math/rand"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -42,6 +44,7 @@ func init() {
 	loginTmpl = template.Must(template.ParseFS(templateFS, "web/templates/login.html"))
 
 	staticFiles, _ = fs.Sub(staticFS, "web/static")
+	rand.Seed(time.Now().UnixNano())
 }
 
 type App struct {
@@ -50,7 +53,7 @@ type App struct {
 	AdminPass string
 
 	Emails      []EmailEntry
-	Macros      []string
+	Macros      []Macro
 	Attachments []Attachment
 	Proxies     []Proxy
 	Accounts    []Account
@@ -83,6 +86,19 @@ type Attachment struct {
 	Inline      bool
 	InlineMacro string
 	Mime        string
+}
+
+type Macro struct {
+	Name    string
+	Type    string
+	Counter int
+	Step    int
+	Chars   string
+	Min     int
+	Max     int
+	Every   int
+	Used    int
+	Last    string
 }
 
 type Proxy struct {
@@ -348,9 +364,40 @@ func handleMacros(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
-	if m := r.FormValue("macro"); m != "" {
-		app.Macros = append(app.Macros, m)
+	name := r.FormValue("name")
+	mtype := r.FormValue("type")
+	if name == "" || mtype == "" {
+		http.Redirect(w, r, "/macros", http.StatusFound)
+		return
 	}
+	mac := Macro{Name: name, Type: mtype, Every: 1}
+	if v := r.FormValue("every"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			mac.Every = n
+		}
+	}
+	switch mtype {
+	case "counter":
+		start, _ := strconv.Atoi(r.FormValue("start"))
+		step, _ := strconv.Atoi(r.FormValue("step"))
+		if step == 0 {
+			step = 1
+		}
+		mac.Counter = start
+		mac.Step = step
+		mac.Last = strconv.Itoa(start)
+	case "random":
+		mac.Chars = r.FormValue("chars")
+		mac.Min, _ = strconv.Atoi(r.FormValue("min"))
+		mac.Max, _ = strconv.Atoi(r.FormValue("max"))
+		if mac.Min <= 0 {
+			mac.Min = 1
+		}
+		if mac.Max < mac.Min {
+			mac.Max = mac.Min
+		}
+	}
+	app.Macros = append(app.Macros, mac)
 	http.Redirect(w, r, "/macros", http.StatusFound)
 }
 
@@ -578,6 +625,79 @@ func parseAccount(line string) (Account, bool) {
 	}, true
 }
 
+func getMacro(name string) *Macro {
+	for i := range app.Macros {
+		if app.Macros[i].Name == name {
+			return &app.Macros[i]
+		}
+	}
+	return nil
+}
+
+func macroValue(m *Macro) string {
+	if m.Every <= 0 {
+		m.Every = 1
+	}
+	if m.Used%m.Every == 0 {
+		switch m.Type {
+		case "counter":
+			m.Last = strconv.Itoa(m.Counter)
+			m.Counter += m.Step
+		case "random":
+			n := m.Min
+			if m.Max > m.Min {
+				n = m.Min + rand.Intn(m.Max-m.Min+1)
+			}
+			var b strings.Builder
+			for i := 0; i < n; i++ {
+				if len(m.Chars) == 0 {
+					m.Chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+				}
+				b.WriteByte(m.Chars[rand.Intn(len(m.Chars))])
+			}
+			m.Last = b.String()
+		}
+	}
+	m.Used++
+	return m.Last
+}
+
+func replaceMacros(text string) string {
+	for {
+		start := strings.Index(text, "{{$")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(text[start:], "}}")
+		if end == -1 {
+			break
+		}
+		end += start
+		name := text[start+3 : end]
+		if m := getMacro(name); m != nil {
+			val := macroValue(m)
+			text = text[:start] + val + text[end+2:]
+		} else {
+			text = text[:start] + text[end+2:]
+		}
+	}
+	return text
+}
+
+func replaceInline(body string, atts []Attachment) (string, error) {
+	for _, a := range atts {
+		if a.Inline {
+			data, err := os.ReadFile(a.Path)
+			if err != nil {
+				return body, err
+			}
+			enc := base64.StdEncoding.EncodeToString(data)
+			body = strings.ReplaceAll(body, a.InlineMacro, enc)
+		}
+	}
+	return body, nil
+}
+
 func checkAccount(acc Account, log *strings.Builder) error {
 	url := fmt.Sprintf("https://%s/api/mobile/v1/reset_fresh?app_state=active&uuid=%s", app.Domain, acc.UUID)
 	req, _ := http.NewRequest("GET", url, nil)
@@ -682,6 +802,13 @@ func sendEmail(subject, body string, atts []Attachment, rcount int, method strin
 	if err != nil {
 		return log.String(), err
 	}
+
+	body, err = replaceInline(body, atts)
+	if err != nil {
+		return log.String(), err
+	}
+	body = replaceMacros(body)
+	subject = replaceMacros(subject)
 
 	var attIDs []string
 	for _, a := range atts {
