@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -87,10 +88,17 @@ var app = &App{
 	TestEvery:      0,
 }
 
+var (
+	accountMu sync.Mutex
+	emailMu   sync.Mutex
+	proxyMu   sync.Mutex
+)
+
 type EmailEntry struct {
-	Name  string
-	Email string
-	Sent  bool
+	Name       string
+	Email      string
+	Sent       bool
+	Processing bool
 }
 
 type Attachment struct {
@@ -133,6 +141,7 @@ type Account struct {
 	UUID      string
 	Sent      int
 	Proxy     string
+	InUse     bool
 }
 
 func initDB() {
@@ -321,6 +330,8 @@ func checkProxy(addr string) bool {
 }
 
 func getProxy() string {
+	proxyMu.Lock()
+	defer proxyMu.Unlock()
 	for i := range app.Proxies {
 		if app.Proxies[i].Alive && !app.Proxies[i].Used {
 			app.Proxies[i].Used = true
@@ -522,32 +533,45 @@ func handleSendStop(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dashboard", http.StatusFound)
 }
 
-func massSend(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) {
-	for {
-		if app.Stop {
-			break
-		}
-		idxs := []int{}
-		for i, e := range app.Emails {
-			if !e.Sent {
-				idxs = append(idxs, i)
-				if len(idxs) == rcount {
-					break
-				}
+func nextBatch(rcount int) []int {
+	emailMu.Lock()
+	defer emailMu.Unlock()
+	idxs := []int{}
+	for i := range app.Emails {
+		if !app.Emails[i].Sent && !app.Emails[i].Processing {
+			app.Emails[i].Processing = true
+			idxs = append(idxs, i)
+			if len(idxs) == rcount {
+				break
 			}
 		}
+	}
+	return idxs
+}
+
+func worker(subject, body string, atts []Attachment, rcount int, method string, firstSep bool, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		if app.Stop {
+			return
+		}
+		idxs := nextBatch(rcount)
 		if len(idxs) == 0 {
-			break
+			return
 		}
-		var batch []EmailEntry
-		for _, idx := range idxs {
-			batch = append(batch, app.Emails[idx])
+		emailMu.Lock()
+		batch := make([]EmailEntry, len(idxs))
+		for i, idx := range idxs {
+			batch[i] = app.Emails[idx]
 		}
+		emailMu.Unlock()
 		logs, err := sendEmail(subject, body, atts, batch, method, firstSep)
+		emailMu.Lock()
 		app.LastLog = logs
 		if err == nil {
 			for _, idx := range idxs {
 				app.Emails[idx].Sent = true
+				app.Emails[idx].Processing = false
 				db.Exec("UPDATE emails SET sent=1 WHERE email=?", app.Emails[idx].Email)
 			}
 			app.TotalSent++
@@ -558,9 +582,21 @@ func massSend(subject, body string, atts []Attachment, rcount int, method string
 				app.LastLog += "\n--- test ---\n" + logs
 			}
 		} else {
-			break
+			for _, idx := range idxs {
+				app.Emails[idx].Processing = false
+			}
 		}
+		emailMu.Unlock()
 	}
+}
+
+func massSend(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) {
+	var wg sync.WaitGroup
+	for i := 0; i < app.Threads; i++ {
+		wg.Add(1)
+		go worker(subject, body, atts, rcount, method, firstSep, &wg)
+	}
+	wg.Wait()
 	app.Sending = false
 }
 
@@ -608,6 +644,7 @@ func handleEmailsDelete(w http.ResponseWriter, r *http.Request) {
 func handleEmailsReset(w http.ResponseWriter, r *http.Request) {
 	for i := range app.Emails {
 		app.Emails[i].Sent = false
+		app.Emails[i].Processing = false
 	}
 	db.Exec("UPDATE emails SET sent=0")
 	http.Redirect(w, r, "/emails", http.StatusFound)
@@ -1109,26 +1146,32 @@ func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry,
 	}
 
 	// choose account considering send limits
-	idx := app.CurrentAccount
-	if idx >= len(app.Accounts) {
+	accountMu.Lock()
+	var acc *Account
+	for i := 0; i < len(app.Accounts); i++ {
+		idx := (app.CurrentAccount + i) % len(app.Accounts)
+		a := &app.Accounts[idx]
+		if a.Sent < app.SendPerAccount && !a.InUse {
+			acc = a
+			a.InUse = true
+			app.CurrentAccount = idx
+			break
+		}
+	}
+	if acc == nil {
+		accountMu.Unlock()
 		return log.String(), fmt.Errorf("аккаунты закончились")
 	}
-	if app.Accounts[idx].Sent >= app.SendPerAccount {
-		idx++
-		if idx >= len(app.Accounts) {
-			if app.CycleAccounts {
-				idx = 0
-			} else {
-				return log.String(), fmt.Errorf("аккаунты закончились")
-			}
-		}
-		app.CurrentAccount = idx
-	}
-	acc := &app.Accounts[app.CurrentAccount]
 	if acc.Proxy == "" {
 		acc.Proxy = getProxy()
 		db.Exec("UPDATE accounts SET proxy=? WHERE login=?", acc.Proxy, acc.Login)
 	}
+	accountMu.Unlock()
+	defer func() {
+		accountMu.Lock()
+		acc.InUse = false
+		accountMu.Unlock()
+	}()
 
 	if err := checkAccount(*acc, &log); err != nil {
 		return log.String(), err
@@ -1214,16 +1257,13 @@ func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry,
 	if res.Status.Status != 1 {
 		return log.String(), fmt.Errorf("отправка не удалась")
 	}
+	accountMu.Lock()
 	acc.Sent++
 	db.Exec("UPDATE accounts SET sent=?, proxy=? WHERE login=?", acc.Sent, acc.Proxy, acc.Login)
 	if acc.Sent >= app.SendPerAccount {
-		app.CurrentAccount++
-		if app.CurrentAccount >= len(app.Accounts) {
-			if app.CycleAccounts {
-				app.CurrentAccount = 0
-			}
-		}
+		app.CurrentAccount = (app.CurrentAccount + 1) % len(app.Accounts)
 	}
+	accountMu.Unlock()
 	return log.String(), nil
 }
 
