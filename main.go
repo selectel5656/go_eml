@@ -451,6 +451,66 @@ func parseAccount(line string) (Account, bool) {
 	}, true
 }
 
+func checkAccount(acc Account) error {
+	url := fmt.Sprintf("https://%s/api/mobile/v1/reset_fresh?app_state=active&uuid=%s", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Host", app.Domain)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Language", "ru-RU;q=1, en-RU;q=0.9")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("код %d", resp.StatusCode)
+	}
+	var res struct {
+		Status struct {
+			Status int `json:"status"`
+		} `json:"status"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+	if res.Status.Status != 1 {
+		return fmt.Errorf("аккаунт не активен")
+	}
+	return nil
+}
+
+func generateOperationID(acc Account) (string, error) {
+	url := fmt.Sprintf("https://%s/api/mobile/v2/generate_operation_id?app_state=foreground&uuid=%s&client=iphone", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Host", app.Domain)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Language", "ru-RU;q=1")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("код %d", resp.StatusCode)
+	}
+	var res struct {
+		OperationID string `json:"operation_id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+	if res.OperationID == "" {
+		return "", fmt.Errorf("нет operation_id")
+	}
+	return res.OperationID, nil
+}
+
 func sendEmail(subject, body string, atts []Attachment) error {
 	if len(app.Accounts) == 0 {
 		return fmt.Errorf("нет аккаунтов")
@@ -461,6 +521,14 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	acc := app.Accounts[0]
 	to := app.Emails[0].Email
 
+	if err := checkAccount(acc); err != nil {
+		return err
+	}
+	opID, err := generateOperationID(acc)
+	if err != nil {
+		return err
+	}
+
 	var attIDs []string
 	for _, a := range atts {
 		_, url, err := uploadAttachment(acc, a.Path)
@@ -469,8 +537,6 @@ func sendEmail(subject, body string, atts []Attachment) error {
 		}
 		attIDs = append(attIDs, url)
 	}
-
-	opID := strconv.FormatInt(time.Now().UnixNano(), 10)
 	payload := map[string]any{
 		"att_ids":       attIDs,
 		"attachesCount": len(attIDs),
@@ -486,9 +552,15 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	b, _ := json.Marshal(payload)
 	url := fmt.Sprintf("https://%s/api/mobile/v1/send?app_state=foreground&uuid=%s", app.Domain, acc.UUID)
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
-	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("Host", app.Domain)
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Language", "ru-RU;q=1")
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("X-Request-Timeout", "180000")
 	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Connection", "close")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -497,6 +569,15 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("код %d", resp.StatusCode)
+	}
+	var res struct {
+		Status struct {
+			Status int `json:"status"`
+		} `json:"status"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+	if res.Status.Status != 1 {
+		return fmt.Errorf("отправка не удалась")
 	}
 	return nil
 }
