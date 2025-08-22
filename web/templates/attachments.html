@@ -2,7 +2,22 @@
 <h2>Аттачи</h2>
 <form method="POST" action="/attachments/add" enctype="multipart/form-data">
     <input type="file" name="file">
-    <label><input type="checkbox" name="inline">Использовать внутри письма (для картинок)</label>
+    <select name="atype" id="att-type">
+        <option value="image">Изображение</option>
+        <option value="docx">DOCX</option>
+        <option value="pdf">PDF</option>
+        <option value="other">Другое</option>
+    </select>
+    <div id="image-opts">
+        <label><input type="checkbox" name="inline">Использовать внутри письма (для картинок)</label>
+    </div>
+    <div id="docx-opts" style="display:none">
+        <label>Страниц от <input type="number" name="pages_min" value="0" style="width:60px"></label>
+        <label>до <input type="number" name="pages_max" value="0" style="width:60px"></label><br>
+        <textarea name="page_content" placeholder="Содержимое последней страницы"></textarea><br>
+        <label><input type="checkbox" name="convert_pdf">Конвертировать в PDF</label>
+        <label>Автор PDF: <input type="text" name="pdf_author"></label>
+    </div>
     <input type="submit" value="Загрузить">
 </form>
 <ul>

@@ -8,4 +8,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!confirm('Удалить?')) e.preventDefault();
     });
   });
+  const typeSel = document.getElementById('att-type');
+  if (typeSel) {
+    const imgOpts = document.getElementById('image-opts');
+    const docxOpts = document.getElementById('docx-opts');
+    const toggle = () => {
+      const v = typeSel.value;
+      imgOpts.style.display = v === 'image' ? 'block' : 'none';
+      docxOpts.style.display = v === 'docx' ? 'block' : 'none';
+    };
+    typeSel.addEventListener('change', toggle);
+    toggle();
+  }
 });

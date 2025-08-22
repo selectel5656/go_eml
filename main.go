@@ -1,31 +1,33 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"compress/gzip"
-	"compress/zlib"
-	"context"
-	"database/sql"
-	"embed"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"html/template"
-	"io"
-	"io/fs"
-	"math/rand"
-	"mime/multipart"
-	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
+        "bufio"
+        "bytes"
+        "compress/gzip"
+        "compress/zlib"
+        "context"
+        "database/sql"
+        "embed"
+        "encoding/base64"
+        "encoding/json"
+        "fmt"
+        "html/template"
+        "io"
+        "io/fs"
+        "math/rand"
+        "mime/multipart"
+        "net/http"
+        "net/url"
+        "os"
+        "path/filepath"
+        "strconv"
+        "strings"
+        "sync"
+        "time"
 
-	_ "github.com/go-sql-driver/mysql"
+        "baliance.com/gooxml/document"
+        "github.com/jung-kurt/gofpdf"
+        _ "github.com/go-sql-driver/mysql"
 )
 
 //go:embed web/templates/*.html
@@ -758,41 +760,96 @@ func handleAttachments(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
-	file, header, err := r.FormFile("file")
-	if err == nil {
-		defer file.Close()
-		data, _ := io.ReadAll(file)
-		os.MkdirAll("uploads", 0755)
-		id := len(app.Attachments) + 1
-		filename := fmt.Sprintf("%d_%s", id, header.Filename)
-		path := "uploads/" + filename
-		os.WriteFile(path, data, 0644)
-		macro := fmt.Sprintf("{{$attach_%d}}", id)
-		inline := r.FormValue("inline") == "on"
-		ext := strings.ToLower(filepath.Ext(header.Filename))
-		mime := ""
-		switch ext {
-		case ".png":
-			mime = "image/png"
-		case ".jpg", ".jpeg":
-			mime = "image/jpeg"
-		case ".gif":
-			mime = "image/gif"
-		}
-		att := Attachment{Name: header.Filename, Macro: macro, Path: path}
-		if inline && mime != "" {
-			att.Inline = true
-			att.Mime = mime
-			att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
-		}
-		app.Attachments = append(app.Attachments, att)
-		in := 0
-		if att.Inline {
-			in = 1
-		}
-		db.Exec("INSERT INTO attachments(name,macro,path,inline,inline_macro,mime) VALUES(?,?,?,?,?,?)", att.Name, att.Macro, att.Path, in, att.InlineMacro, att.Mime)
-	}
-	http.Redirect(w, r, "/attachments", http.StatusFound)
+        file, header, err := r.FormFile("file")
+        if err == nil {
+                defer file.Close()
+                data, _ := io.ReadAll(file)
+                os.MkdirAll("uploads", 0755)
+                id := len(app.Attachments) + 1
+                filename := fmt.Sprintf("%d_%s", id, header.Filename)
+                path := "uploads/" + filename
+                os.WriteFile(path, data, 0644)
+                macro := fmt.Sprintf("{{$attach_%d}}", id)
+                atype := r.FormValue("atype")
+                att := Attachment{Name: header.Filename, Macro: macro, Path: path}
+                switch atype {
+                case "image":
+                        inline := r.FormValue("inline") == "on"
+                        ext := strings.ToLower(filepath.Ext(header.Filename))
+                        switch ext {
+                        case ".png":
+                                att.Mime = "image/png"
+                        case ".jpg", ".jpeg":
+                                att.Mime = "image/jpeg"
+                        case ".gif":
+                                att.Mime = "image/gif"
+                        }
+                        if inline && att.Mime != "" {
+                                att.Inline = true
+                                att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
+                        }
+                case "docx":
+                        att.Mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        min, _ := strconv.Atoi(r.FormValue("pages_min"))
+                        max, _ := strconv.Atoi(r.FormValue("pages_max"))
+                        if max < min {
+                                max = min
+                        }
+                        extra := min
+                        if max > min {
+                                extra = min + rand.Intn(max-min+1)
+                        }
+                        content := replaceMacros(r.FormValue("page_content"))
+                        if extra > 0 {
+                                if doc, err := document.Open(path); err == nil {
+                                        for i := 0; i < extra; i++ {
+                                                para := doc.AddParagraph()
+                                                para.Properties().SetPageBreakBefore(true)
+                                                if i == extra-1 {
+                                                        para.AddRun().AddText(content)
+                                                }
+                                        }
+                                        doc.SaveToFile(path)
+                                }
+                        }
+                        if r.FormValue("convert_pdf") == "on" {
+                                pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
+                                pdf := gofpdf.New("P", "mm", "A4", "")
+                                pdf.SetTitle(att.Name, true)
+                                author := replaceMacros(r.FormValue("pdf_author"))
+                                if author != "" {
+                                        pdf.SetAuthor(author, true)
+                                }
+                                pdf.SetCreationDate(time.Now().Add(-time.Duration(rand.Intn(365*24)) * time.Hour))
+                                for i := 0; i < extra+1; i++ {
+                                        pdf.AddPage()
+                                        pdf.SetFont("Arial", "", 12)
+                                        if i == extra {
+                                                pdf.MultiCell(0, 10, content, "", "", false)
+                                        } else {
+                                                pdf.MultiCell(0, 10, fmt.Sprintf("Page %d", i+1), "", "", false)
+                                        }
+                                }
+                                pdf.OutputFileAndClose(pdfPath)
+                                os.Remove(path)
+                                path = pdfPath
+                                att.Path = path
+                                att.Name = strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
+                                att.Mime = "application/pdf"
+                        }
+                case "pdf":
+                        att.Mime = "application/pdf"
+                default:
+                        att.Mime = "application/octet-stream"
+                }
+                app.Attachments = append(app.Attachments, att)
+                in := 0
+                if att.Inline {
+                        in = 1
+                }
+                db.Exec("INSERT INTO attachments(name,macro,path,inline,inline_macro,mime) VALUES(?,?,?,?,?,?)", att.Name, att.Macro, att.Path, in, att.InlineMacro, att.Mime)
+        }
+        http.Redirect(w, r, "/attachments", http.StatusFound)
 }
 
 func handleAttachmentsDelete(w http.ResponseWriter, r *http.Request) {
