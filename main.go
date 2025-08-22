@@ -276,6 +276,17 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	subject := r.FormValue("subject")
 	body := r.FormValue("body")
+	rcount := 1
+	if v := r.FormValue("rcount"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			rcount = n
+		}
+	}
+	rmethod := r.FormValue("rmethod")
+	if rmethod == "" {
+		rmethod = "to"
+	}
+	firstSep := r.FormValue("firstsep") == "on"
 	var atts []Attachment
 	for _, v := range r.Form["attach"] {
 		if i, err := strconv.Atoi(v); err == nil {
@@ -284,7 +295,7 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	logs, err := sendEmail(subject, body, atts)
+	logs, err := sendEmail(subject, body, atts, rcount, rmethod, firstSep)
 	app.LastLog = logs
 	if err != nil {
 		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape(err.Error()), http.StatusFound)
@@ -625,13 +636,22 @@ func generateOperationID(acc Account, log *strings.Builder) (string, error) {
 	return res.OperationID, nil
 }
 
-func sendEmail(subject, body string, atts []Attachment) (string, error) {
+func sendEmail(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) (string, error) {
 	var log strings.Builder
 	if len(app.Accounts) == 0 {
 		return log.String(), fmt.Errorf("нет аккаунтов")
 	}
 	if len(app.Emails) == 0 {
 		return log.String(), fmt.Errorf("нет получателей")
+	}
+	if rcount > len(app.Emails) {
+		rcount = len(app.Emails)
+	}
+
+	var recipients []string
+	for i := 0; i < rcount; i++ {
+		e := app.Emails[i]
+		recipients = append(recipients, fmt.Sprintf("\"%s\" <%s>", e.Name, e.Email))
 	}
 
 	// choose account considering send limits
@@ -654,7 +674,6 @@ func sendEmail(subject, body string, atts []Attachment) (string, error) {
 	if acc.Proxy == "" {
 		acc.Proxy = getProxy()
 	}
-	to := app.Emails[0].Email
 
 	if err := checkAccount(*acc, &log); err != nil {
 		return log.String(), err
@@ -681,8 +700,29 @@ func sendEmail(subject, body string, atts []Attachment) (string, error) {
 		"operation_id":  opID,
 		"compose_check": "1",
 		"from_mailbox":  acc.Login,
-		"to":            to,
 		"from_name":     acc.FirstName,
+	}
+	switch method {
+	case "cc":
+		if firstSep && len(recipients) > 0 {
+			payload["to"] = recipients[0]
+			if len(recipients) > 1 {
+				payload["cc"] = strings.Join(recipients[1:], ";")
+			}
+		} else {
+			payload["cc"] = strings.Join(recipients, ";")
+		}
+	case "bcc":
+		if firstSep && len(recipients) > 0 {
+			payload["to"] = recipients[0]
+			if len(recipients) > 1 {
+				payload["bcc"] = strings.Join(recipients[1:], ";")
+			}
+		} else {
+			payload["bcc"] = strings.Join(recipients, ";")
+		}
+	default:
+		payload["to"] = strings.Join(recipients, ";")
 	}
 	b, _ := json.Marshal(payload)
 	url := fmt.Sprintf("https://%s/api/mobile/v1/send?app_state=foreground&uuid=%s", app.Domain, acc.UUID)

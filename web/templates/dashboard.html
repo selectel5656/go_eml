@@ -21,6 +21,17 @@
         {{end}}
     {{end}}
 
+    <label>Получателей:</label>
+    <input type="number" name="rcount" value="1" min="1">
+
+    <label>Метод добавления:</label>
+    <select name="rmethod">
+        <option value="to">TO</option>
+        <option value="cc">CC</option>
+        <option value="bcc">BCC</option>
+    </select>
+    <label><input type="checkbox" name="firstsep"> Первый в TO, остальные в выбранное поле</label>
+
     <input type="submit" value="Отправить">
 </form>
 
