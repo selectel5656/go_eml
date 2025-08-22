@@ -55,6 +55,9 @@ type App struct {
 	Domain    string
 	UserAgent string
 	AdminPass string
+	TestEmail string
+	TestEvery int
+	TotalSent int
 
 	Emails      []EmailEntry
 	Macros      []Macro
@@ -81,6 +84,7 @@ var app = &App{
 	SendPerAccount: 1,
 	CycleAccounts:  true,
 	Threads:        1,
+	TestEvery:      0,
 }
 
 type EmailEntry struct {
@@ -186,6 +190,16 @@ func loadSettings() {
 			}
 		case "api_rules":
 			app.APIRules = v
+		case "test_email":
+			app.TestEmail = v
+		case "test_every":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.TestEvery = n
+			}
+		case "total_sent":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.TotalSent = n
+			}
 		}
 	}
 	if app.AdminPass == "" {
@@ -209,6 +223,9 @@ func saveSettings() {
 	}
 	saveSetting("threads", strconv.Itoa(app.Threads))
 	saveSetting("api_rules", app.APIRules)
+	saveSetting("test_email", app.TestEmail)
+	saveSetting("test_every", strconv.Itoa(app.TestEvery))
+	saveSetting("total_sent", strconv.Itoa(app.TotalSent))
 }
 
 func loadEmails() {
@@ -533,6 +550,13 @@ func massSend(subject, body string, atts []Attachment, rcount int, method string
 				app.Emails[idx].Sent = true
 				db.Exec("UPDATE emails SET sent=1 WHERE email=?", app.Emails[idx].Email)
 			}
+			app.TotalSent++
+			saveSetting("total_sent", strconv.Itoa(app.TotalSent))
+			if app.TestEvery > 0 && app.TestEmail != "" && app.TotalSent%app.TestEvery == 0 {
+				testRecipient := []EmailEntry{{Name: "test", Email: app.TestEmail}}
+				logs, _ := sendEmail(subject, body, atts, testRecipient, "to", false)
+				app.LastLog += "\n--- test ---\n" + logs
+			}
 		} else {
 			break
 		}
@@ -829,6 +853,8 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		"SendPerAccount": app.SendPerAccount,
 		"CycleAccounts":  app.CycleAccounts,
 		"Threads":        app.Threads,
+		"TestEmail":      app.TestEmail,
+		"TestEvery":      app.TestEvery,
 	}
 	render(w, "settings", data)
 }
@@ -850,6 +876,16 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 			app.Threads = v
 		}
 	}
+	if te := r.FormValue("testemail"); te != "" {
+		app.TestEmail = te
+	}
+	if n := r.FormValue("testevery"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			app.TestEvery = v
+		} else {
+			app.TestEvery = 0
+		}
+	}
 	app.CycleAccounts = r.FormValue("cycle") == "on"
 	if p := r.FormValue("password"); p != "" {
 		app.AdminPass = p
@@ -862,6 +898,8 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"SendPerAccount": app.SendPerAccount,
 		"CycleAccounts":  app.CycleAccounts,
 		"Threads":        app.Threads,
+		"TestEmail":      app.TestEmail,
+		"TestEvery":      app.TestEvery,
 		"Message":        "Сохранено",
 	}
 	render(w, "settings", data)
