@@ -1,33 +1,33 @@
 package main
 
 import (
-        "bufio"
-        "bytes"
-        "compress/gzip"
-        "compress/zlib"
-        "context"
-        "database/sql"
-        "embed"
-        "encoding/base64"
-        "encoding/json"
-        "fmt"
-        "html/template"
-        "io"
-        "io/fs"
-        "math/rand"
-        "mime/multipart"
-        "net/http"
-        "net/url"
-        "os"
-        "path/filepath"
-        "strconv"
-        "strings"
-        "sync"
-        "time"
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"context"
+	"database/sql"
+	"embed"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"io"
+	"io/fs"
+	"math/rand"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
-        "baliance.com/gooxml/document"
-        "github.com/jung-kurt/gofpdf"
-        _ "github.com/go-sql-driver/mysql"
+	"baliance.com/gooxml/document"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/jung-kurt/gofpdf"
 )
 
 //go:embed web/templates/*.html
@@ -160,7 +160,7 @@ func initDB() {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(255) PRIMARY KEY, value TEXT)`,
 		`CREATE TABLE IF NOT EXISTS emails (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), email VARCHAR(255), sent TINYINT(1))`,
-		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, values TEXT, sequential TINYINT(1), idx INT)`,
+		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, vals TEXT, sequential TINYINT(1), idx INT)`,
 		`CREATE TABLE IF NOT EXISTS attachments (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), macro VARCHAR(255), path TEXT, inline TINYINT(1), inline_macro VARCHAR(255), mime VARCHAR(100))`,
 		`CREATE TABLE IF NOT EXISTS proxies (address VARCHAR(255) PRIMARY KEY, alive TINYINT(1), used TINYINT(1))`,
 		`CREATE TABLE IF NOT EXISTS accounts (login VARCHAR(255) PRIMARY KEY, password VARCHAR(255), first_name VARCHAR(255), last_name VARCHAR(255), api_key TEXT, uuid VARCHAR(255), sent INT, proxy VARCHAR(255))`,
@@ -224,7 +224,7 @@ func loadSettings() {
 }
 
 func saveSetting(k, v string) {
-	db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v)
+	db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", k, v)
 }
 
 func saveSettings() {
@@ -260,17 +260,17 @@ func loadEmails() {
 }
 
 func loadMacros() {
-	rows, err := db.Query("SELECT name,type,counter,step,chars,min,max,every,used,last,values,sequential,idx FROM macros")
+	rows, err := db.Query("SELECT name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx FROM macros")
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m Macro
-		var values string
+		var vals string
 		var seq, idx int
-		rows.Scan(&m.Name, &m.Type, &m.Counter, &m.Step, &m.Chars, &m.Min, &m.Max, &m.Every, &m.Used, &m.Last, &values, &seq, &idx)
-		json.Unmarshal([]byte(values), &m.Values)
+		rows.Scan(&m.Name, &m.Type, &m.Counter, &m.Step, &m.Chars, &m.Min, &m.Max, &m.Every, &m.Used, &m.Last, &vals, &seq, &idx)
+		json.Unmarshal([]byte(vals), &m.Values)
 		m.Sequential = seq == 1
 		m.Index = idx
 		app.Macros = append(app.Macros, m)
@@ -739,7 +739,7 @@ func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
 	if mac.Sequential {
 		seq = 1
 	}
-	db.Exec("INSERT INTO macros(name,type,counter,step,chars,min,max,every,used,last,values,sequential,idx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+	db.Exec("INSERT INTO macros(name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		mac.Name, mac.Type, mac.Counter, mac.Step, mac.Chars, mac.Min, mac.Max, mac.Every, mac.Used, mac.Last, string(vals), seq, mac.Index)
 	http.Redirect(w, r, "/macros", http.StatusFound)
 }
@@ -760,96 +760,96 @@ func handleAttachments(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
-        file, header, err := r.FormFile("file")
-        if err == nil {
-                defer file.Close()
-                data, _ := io.ReadAll(file)
-                os.MkdirAll("uploads", 0755)
-                id := len(app.Attachments) + 1
-                filename := fmt.Sprintf("%d_%s", id, header.Filename)
-                path := "uploads/" + filename
-                os.WriteFile(path, data, 0644)
-                macro := fmt.Sprintf("{{$attach_%d}}", id)
-                atype := r.FormValue("atype")
-                att := Attachment{Name: header.Filename, Macro: macro, Path: path}
-                switch atype {
-                case "image":
-                        inline := r.FormValue("inline") == "on"
-                        ext := strings.ToLower(filepath.Ext(header.Filename))
-                        switch ext {
-                        case ".png":
-                                att.Mime = "image/png"
-                        case ".jpg", ".jpeg":
-                                att.Mime = "image/jpeg"
-                        case ".gif":
-                                att.Mime = "image/gif"
-                        }
-                        if inline && att.Mime != "" {
-                                att.Inline = true
-                                att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
-                        }
-                case "docx":
-                        att.Mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        min, _ := strconv.Atoi(r.FormValue("pages_min"))
-                        max, _ := strconv.Atoi(r.FormValue("pages_max"))
-                        if max < min {
-                                max = min
-                        }
-                        extra := min
-                        if max > min {
-                                extra = min + rand.Intn(max-min+1)
-                        }
-                        content := replaceMacros(r.FormValue("page_content"))
-                        if extra > 0 {
-                                if doc, err := document.Open(path); err == nil {
-                                        for i := 0; i < extra; i++ {
-                                                para := doc.AddParagraph()
-                                                para.Properties().SetPageBreakBefore(true)
-                                                if i == extra-1 {
-                                                        para.AddRun().AddText(content)
-                                                }
-                                        }
-                                        doc.SaveToFile(path)
-                                }
-                        }
-                        if r.FormValue("convert_pdf") == "on" {
-                                pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
-                                pdf := gofpdf.New("P", "mm", "A4", "")
-                                pdf.SetTitle(att.Name, true)
-                                author := replaceMacros(r.FormValue("pdf_author"))
-                                if author != "" {
-                                        pdf.SetAuthor(author, true)
-                                }
-                                pdf.SetCreationDate(time.Now().Add(-time.Duration(rand.Intn(365*24)) * time.Hour))
-                                for i := 0; i < extra+1; i++ {
-                                        pdf.AddPage()
-                                        pdf.SetFont("Arial", "", 12)
-                                        if i == extra {
-                                                pdf.MultiCell(0, 10, content, "", "", false)
-                                        } else {
-                                                pdf.MultiCell(0, 10, fmt.Sprintf("Page %d", i+1), "", "", false)
-                                        }
-                                }
-                                pdf.OutputFileAndClose(pdfPath)
-                                os.Remove(path)
-                                path = pdfPath
-                                att.Path = path
-                                att.Name = strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
-                                att.Mime = "application/pdf"
-                        }
-                case "pdf":
-                        att.Mime = "application/pdf"
-                default:
-                        att.Mime = "application/octet-stream"
-                }
-                app.Attachments = append(app.Attachments, att)
-                in := 0
-                if att.Inline {
-                        in = 1
-                }
-                db.Exec("INSERT INTO attachments(name,macro,path,inline,inline_macro,mime) VALUES(?,?,?,?,?,?)", att.Name, att.Macro, att.Path, in, att.InlineMacro, att.Mime)
-        }
-        http.Redirect(w, r, "/attachments", http.StatusFound)
+	file, header, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		os.MkdirAll("uploads", 0755)
+		id := len(app.Attachments) + 1
+		filename := fmt.Sprintf("%d_%s", id, header.Filename)
+		path := "uploads/" + filename
+		os.WriteFile(path, data, 0644)
+		macro := fmt.Sprintf("{{$attach_%d}}", id)
+		atype := r.FormValue("atype")
+		att := Attachment{Name: header.Filename, Macro: macro, Path: path}
+		switch atype {
+		case "image":
+			inline := r.FormValue("inline") == "on"
+			ext := strings.ToLower(filepath.Ext(header.Filename))
+			switch ext {
+			case ".png":
+				att.Mime = "image/png"
+			case ".jpg", ".jpeg":
+				att.Mime = "image/jpeg"
+			case ".gif":
+				att.Mime = "image/gif"
+			}
+			if inline && att.Mime != "" {
+				att.Inline = true
+				att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
+			}
+		case "docx":
+			att.Mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+			min, _ := strconv.Atoi(r.FormValue("pages_min"))
+			max, _ := strconv.Atoi(r.FormValue("pages_max"))
+			if max < min {
+				max = min
+			}
+			extra := min
+			if max > min {
+				extra = min + rand.Intn(max-min+1)
+			}
+			content := replaceMacros(r.FormValue("page_content"))
+			if extra > 0 {
+				if doc, err := document.Open(path); err == nil {
+					for i := 0; i < extra; i++ {
+						para := doc.AddParagraph()
+						para.Properties().SetPageBreakBefore(true)
+						if i == extra-1 {
+							para.AddRun().AddText(content)
+						}
+					}
+					doc.SaveToFile(path)
+				}
+			}
+			if r.FormValue("convert_pdf") == "on" {
+				pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
+				pdf := gofpdf.New("P", "mm", "A4", "")
+				pdf.SetTitle(att.Name, true)
+				author := replaceMacros(r.FormValue("pdf_author"))
+				if author != "" {
+					pdf.SetAuthor(author, true)
+				}
+				pdf.SetCreationDate(time.Now().Add(-time.Duration(rand.Intn(365*24)) * time.Hour))
+				for i := 0; i < extra+1; i++ {
+					pdf.AddPage()
+					pdf.SetFont("Arial", "", 12)
+					if i == extra {
+						pdf.MultiCell(0, 10, content, "", "", false)
+					} else {
+						pdf.MultiCell(0, 10, fmt.Sprintf("Page %d", i+1), "", "", false)
+					}
+				}
+				pdf.OutputFileAndClose(pdfPath)
+				os.Remove(path)
+				path = pdfPath
+				att.Path = path
+				att.Name = strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
+				att.Mime = "application/pdf"
+			}
+		case "pdf":
+			att.Mime = "application/pdf"
+		default:
+			att.Mime = "application/octet-stream"
+		}
+		app.Attachments = append(app.Attachments, att)
+		in := 0
+		if att.Inline {
+			in = 1
+		}
+		db.Exec("INSERT INTO attachments(name,macro,path,inline,inline_macro,mime) VALUES(?,?,?,?,?,?)", att.Name, att.Macro, att.Path, in, att.InlineMacro, att.Mime)
+	}
+	http.Redirect(w, r, "/attachments", http.StatusFound)
 }
 
 func handleAttachmentsDelete(w http.ResponseWriter, r *http.Request) {
@@ -1157,7 +1157,7 @@ func macroValue(m *Macro) string {
 	if m.Sequential {
 		seq = 1
 	}
-	db.Exec("UPDATE macros SET counter=?,step=?,chars=?,min=?,max=?,every=?,used=?,last=?,values=?,sequential=?,idx=? WHERE name=?",
+	db.Exec("UPDATE macros SET counter=?,step=?,chars=?,min=?,max=?,every=?,used=?,last=?,vals=?,sequential=?,idx=? WHERE name=?",
 		m.Counter, m.Step, m.Chars, m.Min, m.Max, m.Every, m.Used, m.Last, string(vals), seq, m.Index, m.Name)
 	return m.Last
 }
