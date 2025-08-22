@@ -53,12 +53,18 @@ type App struct {
 	Proxies     []string
 	Accounts    []Account
 	APIRules    string
+
+	SendPerAccount int
+	CycleAccounts  bool
+	CurrentAccount int
 }
 
 var app = &App{
-	Domain:    "domen.ru",
-	UserAgent: "MyUserAgent",
-	AdminPass: "admin",
+	Domain:         "domen.ru",
+	UserAgent:      "MyUserAgent",
+	AdminPass:      "admin",
+	SendPerAccount: 1,
+	CycleAccounts:  true,
 }
 
 type EmailEntry struct {
@@ -82,6 +88,7 @@ type Account struct {
 	LastName  string
 	APIKey    string
 	UUID      string
+	Sent      int
 }
 
 func main() {
@@ -109,6 +116,7 @@ func main() {
 	http.HandleFunc("/accounts/add", requireAuth(handleAccountsAdd))
 	http.HandleFunc("/accounts/upload", requireAuth(handleAccountsUpload))
 	http.HandleFunc("/accounts/delete", requireAuth(handleAccountsDelete))
+	http.HandleFunc("/accounts/reset", requireAuth(handleAccountsReset))
 	http.HandleFunc("/api-rules", requireAuth(handleAPIRules))
 	http.HandleFunc("/api-rules/save", requireAuth(handleAPIRulesSave))
 	http.HandleFunc("/settings", requireAuth(handleSettings))
@@ -374,6 +382,14 @@ func handleAccountsDelete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/accounts", http.StatusFound)
 }
 
+func handleAccountsReset(w http.ResponseWriter, r *http.Request) {
+	for i := range app.Accounts {
+		app.Accounts[i].Sent = 0
+	}
+	app.CurrentAccount = 0
+	http.Redirect(w, r, "/accounts", http.StatusFound)
+}
+
 func handleAPIRules(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{"Title": "API правила", "APIRules": app.APIRules}
 	render(w, "api-rules", data)
@@ -386,9 +402,11 @@ func handleAPIRulesSave(w http.ResponseWriter, r *http.Request) {
 
 func handleSettings(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
-		"Title":     "Настройки",
-		"Domain":    app.Domain,
-		"UserAgent": app.UserAgent,
+		"Title":          "Настройки",
+		"Domain":         app.Domain,
+		"UserAgent":      app.UserAgent,
+		"SendPerAccount": app.SendPerAccount,
+		"CycleAccounts":  app.CycleAccounts,
 	}
 	render(w, "settings", data)
 }
@@ -400,14 +418,22 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	if ua := r.FormValue("useragent"); ua != "" {
 		app.UserAgent = ua
 	}
+	if n := r.FormValue("sendlimit"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			app.SendPerAccount = v
+		}
+	}
+	app.CycleAccounts = r.FormValue("cycle") == "on"
 	if p := r.FormValue("password"); p != "" {
 		app.AdminPass = p
 	}
 	data := map[string]any{
-		"Title":     "Настройки",
-		"Domain":    app.Domain,
-		"UserAgent": app.UserAgent,
-		"Message":   "Сохранено",
+		"Title":          "Настройки",
+		"Domain":         app.Domain,
+		"UserAgent":      app.UserAgent,
+		"SendPerAccount": app.SendPerAccount,
+		"CycleAccounts":  app.CycleAccounts,
+		"Message":        "Сохранено",
 	}
 	render(w, "settings", data)
 }
@@ -448,6 +474,7 @@ func parseAccount(line string) (Account, bool) {
 		LastName:  parts[3],
 		APIKey:    parts[4],
 		UUID:      parts[5],
+		Sent:      0,
 	}, true
 }
 
@@ -489,9 +516,11 @@ func generateOperationID(acc Account) (string, error) {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("User-Agent", app.UserAgent)
 	req.Header.Set("Accept-Language", "ru-RU;q=1")
+	req.Header.Set("Content-Length", "0")
+	req.Header.Set("Connection", "close")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -518,20 +547,37 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	if len(app.Emails) == 0 {
 		return fmt.Errorf("нет получателей")
 	}
-	acc := app.Accounts[0]
+
+	// choose account considering send limits
+	idx := app.CurrentAccount
+	if idx >= len(app.Accounts) {
+		return fmt.Errorf("аккаунты закончились")
+	}
+	if app.Accounts[idx].Sent >= app.SendPerAccount {
+		idx++
+		if idx >= len(app.Accounts) {
+			if app.CycleAccounts {
+				idx = 0
+			} else {
+				return fmt.Errorf("аккаунты закончились")
+			}
+		}
+		app.CurrentAccount = idx
+	}
+	acc := &app.Accounts[app.CurrentAccount]
 	to := app.Emails[0].Email
 
-	if err := checkAccount(acc); err != nil {
+	if err := checkAccount(*acc); err != nil {
 		return err
 	}
-	opID, err := generateOperationID(acc)
+	opID, err := generateOperationID(*acc)
 	if err != nil {
 		return err
 	}
 
 	var attIDs []string
 	for _, a := range atts {
-		_, url, err := uploadAttachment(acc, a.Path)
+		_, url, err := uploadAttachment(*acc, a.Path)
 		if err != nil {
 			return err
 		}
@@ -578,6 +624,15 @@ func sendEmail(subject, body string, atts []Attachment) error {
 	json.NewDecoder(resp.Body).Decode(&res)
 	if res.Status.Status != 1 {
 		return fmt.Errorf("отправка не удалась")
+	}
+	acc.Sent++
+	if acc.Sent >= app.SendPerAccount {
+		app.CurrentAccount++
+		if app.CurrentAccount >= len(app.Accounts) {
+			if app.CycleAccounts {
+				app.CurrentAccount = 0
+			}
+		}
 	}
 	return nil
 }
