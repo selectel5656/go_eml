@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"embed"
+	"fmt"
 	"html/template"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 )
 
 //go:embed web/templates/*.html
@@ -17,11 +22,11 @@ type App struct {
 	UserAgent string
 	AdminPass string
 
-	Emails      []string
+	Emails      []EmailEntry
 	Macros      []string
-	Attachments []string
+	Attachments []Attachment
 	Proxies     []string
-	Accounts    []string
+	Accounts    []Account
 	APIRules    string
 }
 
@@ -29,6 +34,26 @@ var app = &App{
 	Domain:    "domen.ru",
 	UserAgent: "MyUserAgent",
 	AdminPass: "admin",
+}
+
+type EmailEntry struct {
+	Name  string
+	Email string
+}
+
+type Attachment struct {
+	Name  string
+	Macro string
+	Path  string
+}
+
+type Account struct {
+	Login     string
+	Password  string
+	FirstName string
+	LastName  string
+	APIKey    string
+	UUID      string
 }
 
 func main() {
@@ -39,6 +64,7 @@ func main() {
 	http.HandleFunc("/send", requireAuth(handleSend))
 	http.HandleFunc("/emails", requireAuth(handleEmails))
 	http.HandleFunc("/emails/add", requireAuth(handleEmailsAdd))
+	http.HandleFunc("/emails/upload", requireAuth(handleEmailsUpload))
 	http.HandleFunc("/emails/delete", requireAuth(handleEmailsDelete))
 	http.HandleFunc("/macros", requireAuth(handleMacros))
 	http.HandleFunc("/macros/add", requireAuth(handleMacrosAdd))
@@ -48,9 +74,11 @@ func main() {
 	http.HandleFunc("/attachments/delete", requireAuth(handleAttachmentsDelete))
 	http.HandleFunc("/proxies", requireAuth(handleProxies))
 	http.HandleFunc("/proxies/add", requireAuth(handleProxiesAdd))
+	http.HandleFunc("/proxies/upload", requireAuth(handleProxiesUpload))
 	http.HandleFunc("/proxies/delete", requireAuth(handleProxiesDelete))
 	http.HandleFunc("/accounts", requireAuth(handleAccounts))
 	http.HandleFunc("/accounts/add", requireAuth(handleAccountsAdd))
+	http.HandleFunc("/accounts/upload", requireAuth(handleAccountsUpload))
 	http.HandleFunc("/accounts/delete", requireAuth(handleAccountsDelete))
 	http.HandleFunc("/api-rules", requireAuth(handleAPIRules))
 	http.HandleFunc("/api-rules/save", requireAuth(handleAPIRulesSave))
@@ -116,8 +144,22 @@ func handleEmails(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleEmailsAdd(w http.ResponseWriter, r *http.Request) {
-	if e := r.FormValue("email"); e != "" {
+	if e, ok := parseEmail(r.FormValue("email")); ok {
 		app.Emails = append(app.Emails, e)
+	}
+	http.Redirect(w, r, "/emails", http.StatusFound)
+}
+
+func handleEmailsUpload(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			if e, ok := parseEmail(scanner.Text()); ok {
+				app.Emails = append(app.Emails, e)
+			}
+		}
 	}
 	http.Redirect(w, r, "/emails", http.StatusFound)
 }
@@ -158,8 +200,17 @@ func handleAttachments(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
-	if a := r.FormValue("attachment"); a != "" {
-		app.Attachments = append(app.Attachments, a)
+	file, header, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		os.MkdirAll("uploads", 0755)
+		id := len(app.Attachments) + 1
+		filename := fmt.Sprintf("%d_%s", id, header.Filename)
+		path := "uploads/" + filename
+		os.WriteFile(path, data, 0644)
+		macro := fmt.Sprintf("{{$attach_%d}}", id)
+		app.Attachments = append(app.Attachments, Attachment{Name: header.Filename, Macro: macro, Path: path})
 	}
 	http.Redirect(w, r, "/attachments", http.StatusFound)
 }
@@ -167,6 +218,7 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 func handleAttachmentsDelete(w http.ResponseWriter, r *http.Request) {
 	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
 		if i >= 0 && i < len(app.Attachments) {
+			os.Remove(app.Attachments[i].Path)
 			app.Attachments = append(app.Attachments[:i], app.Attachments[i+1:]...)
 		}
 	}
@@ -181,6 +233,21 @@ func handleProxies(w http.ResponseWriter, r *http.Request) {
 func handleProxiesAdd(w http.ResponseWriter, r *http.Request) {
 	if p := r.FormValue("proxy"); p != "" {
 		app.Proxies = append(app.Proxies, p)
+	}
+	http.Redirect(w, r, "/proxies", http.StatusFound)
+}
+
+func handleProxiesUpload(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				app.Proxies = append(app.Proxies, line)
+			}
+		}
 	}
 	http.Redirect(w, r, "/proxies", http.StatusFound)
 }
@@ -200,8 +267,22 @@ func handleAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAccountsAdd(w http.ResponseWriter, r *http.Request) {
-	if a := r.FormValue("account"); a != "" {
+	if a, ok := parseAccount(r.FormValue("account")); ok {
 		app.Accounts = append(app.Accounts, a)
+	}
+	http.Redirect(w, r, "/accounts", http.StatusFound)
+}
+
+func handleAccountsUpload(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			if a, ok := parseAccount(scanner.Text()); ok {
+				app.Accounts = append(app.Accounts, a)
+			}
+		}
 	}
 	http.Redirect(w, r, "/accounts", http.StatusFound)
 }
@@ -251,4 +332,43 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"Message":   "Сохранено",
 	}
 	tmpl.ExecuteTemplate(w, "layout.html", data)
+}
+
+func parseEmail(line string) (EmailEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return EmailEntry{}, false
+	}
+	line = strings.TrimSuffix(line, ";")
+	var name, email string
+	if i := strings.Index(line, "<"); i >= 0 {
+		if j := strings.Index(line, ">"); j > i {
+			email = strings.TrimSpace(line[i+1 : j])
+			name = strings.TrimSpace(line[:i])
+		}
+	}
+	if email == "" {
+		email = line
+	}
+	if name == "" {
+		if at := strings.Index(email, "@"); at > 0 {
+			name = email[:at]
+		}
+	}
+	return EmailEntry{Name: name, Email: email}, true
+}
+
+func parseAccount(line string) (Account, bool) {
+	parts := strings.Split(strings.TrimSpace(line), ":")
+	if len(parts) < 6 {
+		return Account{}, false
+	}
+	return Account{
+		Login:     parts[0],
+		Password:  parts[1],
+		FirstName: parts[2],
+		LastName:  parts[3],
+		APIKey:    parts[4],
+		UUID:      parts[5],
+	}, true
 }

@@ -7,7 +7,7 @@
     <label>Аттачи:</label>
     <select name="attachment">
         {{range .Attachments}}
-        <option value="{{.}}">{{.}}</option>
+        <option value="{{.Path}}">{{.Name}}</option>
         {{end}}
     </select><br>
     <input type="submit" value="Отправить (фейк)">

@@ -1,12 +1,16 @@
 {{define "content"}}
 <h2>База e-mail</h2>
 <form method="POST" action="/emails/add">
-    <input type="text" name="email" placeholder="login@domain.com">
+    <input type="text" name="email" placeholder="Имя <login@domain.com>">
     <input type="submit" value="Добавить">
+</form>
+<form method="POST" action="/emails/upload" enctype="multipart/form-data">
+    <input type="file" name="file">
+    <input type="submit" value="Загрузить файл">
 </form>
 <ul>
     {{range $i, $e := .Emails}}
-    <li>{{$e}} <a href="/emails/delete?i={{$i}}">удалить</a></li>
+    <li>{{if $e.Name}}{{$e.Name}} &lt;{{$e.Email}}&gt;{{else}}{{$e.Email}}{{end}} <a href="/emails/delete?i={{$i}}">удалить</a></li>
     {{end}}
 </ul>
 {{end}}

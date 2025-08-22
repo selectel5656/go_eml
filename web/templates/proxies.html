@@ -4,6 +4,10 @@
     <input type="text" name="proxy" placeholder="ip:port">
     <input type="submit" value="Добавить">
 </form>
+<form method="POST" action="/proxies/upload" enctype="multipart/form-data">
+    <input type="file" name="file">
+    <input type="submit" value="Загрузить файл">
+</form>
 <ul>
     {{range $i, $p := .Proxies}}
     <li>{{$p}} <a href="/proxies/delete?i={{$i}}">удалить</a></li>

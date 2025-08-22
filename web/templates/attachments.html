@@ -1,12 +1,12 @@
 {{define "content"}}
 <h2>Аттачи</h2>
-<form method="POST" action="/attachments/add">
-    <input type="text" name="attachment" placeholder="file.pdf">
-    <input type="submit" value="Добавить">
+<form method="POST" action="/attachments/add" enctype="multipart/form-data">
+    <input type="file" name="file">
+    <input type="submit" value="Загрузить">
 </form>
 <ul>
     {{range $i, $a := .Attachments}}
-    <li>{{$a}} <a href="/attachments/delete?i={{$i}}">удалить</a></li>
+    <li>{{$a.Name}} {{$a.Macro}} <a href="/attachments/delete?i={{$i}}">удалить</a></li>
     {{end}}
 </ul>
 {{end}}
