@@ -2,11 +2,18 @@
 <h2>Аттачи</h2>
 <form method="POST" action="/attachments/add" enctype="multipart/form-data">
     <input type="file" name="file">
+    <label><input type="checkbox" name="inline">Использовать внутри письма (для картинок)</label>
     <input type="submit" value="Загрузить">
 </form>
 <ul>
     {{range $i, $a := .Attachments}}
-    <li>{{$a.Name}} {{$a.Macro}} <a href="/attachments/delete?i={{$i}}" class="delete-link">удалить</a></li>
+    <li>
+        {{$a.Name}} {{$a.Macro}}
+        {{if $a.Inline}}
+            {{$a.InlineMacro}} пример: &lt;img src="data:{{$a.Mime}};base64,{{$a.InlineMacro}}"&gt;
+        {{end}}
+        <a href="/attachments/delete?i={{$i}}" class="delete-link">удалить</a>
+    </li>
     {{end}}
 </ul>
 {{end}}

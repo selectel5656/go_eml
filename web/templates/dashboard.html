@@ -15,6 +15,11 @@
         <option value="{{$i}}">{{$a.Name}}</option>
         {{end}}
     </select>
+    {{range $a := .Attachments}}
+        {{if $a.Inline}}
+        <div class="inline-hint">{{$a.Name}} макрос: {{$a.InlineMacro}}<br><code>&lt;img src="data:{{$a.Mime}};base64,{{$a.InlineMacro}}"&gt;</code></div>
+        {{end}}
+    {{end}}
 
     <input type="submit" value="Отправить">
 </form>

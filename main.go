@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -24,6 +25,8 @@ var templateFS embed.FS
 //go:embed web/static/*
 var staticFS embed.FS
 
+var staticFiles fs.FS
+
 var (
 	templates = map[string]*template.Template{}
 	loginTmpl *template.Template
@@ -35,6 +38,8 @@ func init() {
 		templates[p] = template.Must(template.ParseFS(templateFS, "web/templates/layout.html", "web/templates/"+p+".html"))
 	}
 	loginTmpl = template.Must(template.ParseFS(templateFS, "web/templates/login.html"))
+
+	staticFiles, _ = fs.Sub(staticFS, "web/static")
 }
 
 type App struct {
@@ -62,9 +67,12 @@ type EmailEntry struct {
 }
 
 type Attachment struct {
-	Name  string
-	Macro string
-	Path  string
+	Name        string
+	Macro       string
+	Path        string
+	Inline      bool
+	InlineMacro string
+	Mime        string
 }
 
 type Account struct {
@@ -77,7 +85,7 @@ type Account struct {
 }
 
 func main() {
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
 	http.HandleFunc("/", handleRoot)
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/logout", handleLogout)
@@ -263,7 +271,24 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 		path := "uploads/" + filename
 		os.WriteFile(path, data, 0644)
 		macro := fmt.Sprintf("{{$attach_%d}}", id)
-		app.Attachments = append(app.Attachments, Attachment{Name: header.Filename, Macro: macro, Path: path})
+		inline := r.FormValue("inline") == "on"
+		ext := strings.ToLower(filepath.Ext(header.Filename))
+		mime := ""
+		switch ext {
+		case ".png":
+			mime = "image/png"
+		case ".jpg", ".jpeg":
+			mime = "image/jpeg"
+		case ".gif":
+			mime = "image/gif"
+		}
+		att := Attachment{Name: header.Filename, Macro: macro, Path: path}
+		if inline && mime != "" {
+			att.Inline = true
+			att.Mime = mime
+			att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
+		}
+		app.Attachments = append(app.Attachments, att)
 	}
 	http.Redirect(w, r, "/attachments", http.StatusFound)
 }
