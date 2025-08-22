@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 //go:embed web/templates/*.html
@@ -146,18 +146,22 @@ type Account struct {
 }
 
 func initDB() {
+	dsn := os.Getenv("MYSQL_DSN")
+	if dsn == "" {
+		dsn = "root:password@tcp(127.0.0.1:3306)/go_eml?parseTime=true"
+	}
 	var err error
-	db, err = sql.Open("sqlite3", "app.db")
+	db, err = sql.Open("mysql", dsn)
 	if err != nil {
 		panic(err)
 	}
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`,
-		`CREATE TABLE IF NOT EXISTS emails (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT, sent INTEGER)`,
-		`CREATE TABLE IF NOT EXISTS macros (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, type TEXT, counter INTEGER, step INTEGER, chars TEXT, min INTEGER, max INTEGER, every INTEGER, used INTEGER, last TEXT, values TEXT, sequential INTEGER, idx INTEGER)`,
-		`CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, macro TEXT, path TEXT, inline INTEGER, inline_macro TEXT, mime TEXT)`,
-		`CREATE TABLE IF NOT EXISTS proxies (address TEXT PRIMARY KEY, alive INTEGER, used INTEGER)`,
-		`CREATE TABLE IF NOT EXISTS accounts (login TEXT PRIMARY KEY, password TEXT, first_name TEXT, last_name TEXT, api_key TEXT, uuid TEXT, sent INTEGER, proxy TEXT)`,
+		`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(255) PRIMARY KEY, value TEXT)`,
+		`CREATE TABLE IF NOT EXISTS emails (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), email VARCHAR(255), sent TINYINT(1))`,
+		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, values TEXT, sequential TINYINT(1), idx INT)`,
+		`CREATE TABLE IF NOT EXISTS attachments (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), macro VARCHAR(255), path TEXT, inline TINYINT(1), inline_macro VARCHAR(255), mime VARCHAR(100))`,
+		`CREATE TABLE IF NOT EXISTS proxies (address VARCHAR(255) PRIMARY KEY, alive TINYINT(1), used TINYINT(1))`,
+		`CREATE TABLE IF NOT EXISTS accounts (login VARCHAR(255) PRIMARY KEY, password VARCHAR(255), first_name VARCHAR(255), last_name VARCHAR(255), api_key TEXT, uuid VARCHAR(255), sent INT, proxy VARCHAR(255))`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

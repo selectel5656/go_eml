@@ -5,20 +5,24 @@
 ## Запуск на Ubuntu
 ```bash
 sudo apt update
-sudo apt install -y golang-go
+sudo apt install -y golang-go mysql-server
+sudo service mysql start
+mysql -u root -e "CREATE DATABASE IF NOT EXISTS go_eml;"
+export MYSQL_DSN="root:@tcp(127.0.0.1:3306)/go_eml?parseTime=true"
 cd /path/to/go_eml
 go run .
 ```
 После запуска откройте в браузере `http://localhost:8080`.
 
 ## Запуск на Windows
-1. Установите [Go](https://go.dev/dl/).
-2. Откройте командную строку и перейдите в каталог проекта.
-3. Выполните:
+1. Установите [Go](https://go.dev/dl/) и MySQL.
+2. Создайте базу `go_eml` и настройте строку подключения, напр. `set MYSQL_DSN=user:pass@tcp(127.0.0.1:3306)/go_eml?parseTime=true`.
+3. Откройте командную строку и перейдите в каталог проекта.
+4. Выполните:
     ```cmd
     go run .
     ```
-4. В браузере откройте `http://localhost:8080`.
+5. В браузере откройте `http://localhost:8080`.
 
 Проект содержит вкладки:
 - Письмо (отправляет письмо через API первого доступного аккаунта)
@@ -42,4 +46,6 @@ go run .
 При отправке письма панель сначала проверяет выбранный аккаунт запросом `reset_fresh`, затем получает `operation_id` через `generate_operation_id` и лишь после этого делает `send`.
 
 Для каждого аккаунта ведётся счётчик отправок. Если он достигает заданного лимита, панель переключается на следующий аккаунт. Счётчики можно сбросить на вкладке «Аккаунты API».
-Все данные сохраняются в базе SQLite (`app.db`) и доступны после перезапуска.
+Все данные сохраняются в MySQL. Перед запуском поднимите сервер MySQL и создайте базу `go_eml`,
+затем задайте строку подключения в переменной окружения `MYSQL_DSN` (например,
+`export MYSQL_DSN=user:pass@tcp(127.0.0.1:3306)/go_eml?parseTime=true`).
