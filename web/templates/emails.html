@@ -5,6 +5,11 @@
     <input type="submit" value="Добавить">
 </form>
 <form method="POST" action="/emails/upload" enctype="multipart/form-data">
+    <select name="format">
+        <option value="name_angle">Имя &lt;login@domen.ru&gt;</option>
+        <option value="name_angle_semicolon">Имя &lt;login@domen.ru&gt;;</option>
+        <option value="email">login@domen.ru</option>
+    </select>
     <input type="file" name="file">
     <input type="submit" value="Загрузить файл">
 </form>

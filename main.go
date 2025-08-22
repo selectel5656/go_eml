@@ -617,12 +617,13 @@ func handleEmailsAdd(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleEmailsUpload(w http.ResponseWriter, r *http.Request) {
+	format := r.FormValue("format")
 	file, _, err := r.FormFile("file")
 	if err == nil {
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			if e, ok := parseEmail(scanner.Text()); ok {
+			if e, ok := parseEmailFormat(scanner.Text(), format); ok {
 				app.Emails = append(app.Emails, e)
 				db.Exec("INSERT INTO emails(name,email,sent) VALUES(?,?,0)", e.Name, e.Email)
 			}
@@ -940,6 +941,43 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"Message":        "Сохранено",
 	}
 	render(w, "settings", data)
+}
+
+func parseEmailFormat(line, format string) (EmailEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return EmailEntry{}, false
+	}
+	switch format {
+	case "name_angle", "name_angle_semicolon":
+		line = strings.TrimSuffix(line, ";")
+		var name, email string
+		if i := strings.Index(line, "<"); i >= 0 {
+			if j := strings.Index(line, ">"); j > i {
+				email = strings.TrimSpace(line[i+1 : j])
+				name = strings.TrimSpace(line[:i])
+			}
+		}
+		if email == "" {
+			email = line
+		}
+		if name == "" {
+			if at := strings.Index(email, "@"); at > 0 {
+				name = email[:at]
+			}
+		}
+		return EmailEntry{Name: name, Email: email}, true
+	case "email":
+		line = strings.TrimSuffix(line, ";")
+		email := line
+		name := email
+		if at := strings.Index(email, "@"); at > 0 {
+			name = email[:at]
+		}
+		return EmailEntry{Name: name, Email: email}, true
+	default:
+		return parseEmail(line)
+	}
 }
 
 func parseEmail(line string) (EmailEntry, bool) {
