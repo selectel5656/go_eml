@@ -1,16 +1,19 @@
 {{define "content"}}
 <h2>Макросы</h2>
-<form method="POST" action="/macros/add">
+<form method="POST" action="/macros/add" enctype="multipart/form-data">
     <input type="text" name="name" placeholder="Имя макроса">
     <select name="type">
         <option value="counter">Счётчик</option>
         <option value="random">Рандом</option>
+        <option value="list">Список</option>
     </select>
     <input type="number" name="start" placeholder="Старт">
     <input type="number" name="step" placeholder="Шаг">
     <input type="text" name="chars" placeholder="Символы">
     <input type="number" name="min" placeholder="Мин">
     <input type="number" name="max" placeholder="Макс">
+    <input type="file" name="file">
+    <label><input type="checkbox" name="seq">Последовательно</label>
     <input type="number" name="every" placeholder="Каждые N писем" value="1">
     <input type="submit" value="Добавить">
 </form>

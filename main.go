@@ -95,16 +95,19 @@ type Attachment struct {
 }
 
 type Macro struct {
-	Name    string
-	Type    string
-	Counter int
-	Step    int
-	Chars   string
-	Min     int
-	Max     int
-	Every   int
-	Used    int
-	Last    string
+	Name       string
+	Type       string
+	Counter    int
+	Step       int
+	Chars      string
+	Min        int
+	Max        int
+	Every      int
+	Used       int
+	Last       string
+	Values     []string
+	Sequential bool
+	Index      int
 }
 
 type Proxy struct {
@@ -454,6 +457,17 @@ func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
 		if mac.Max < mac.Min {
 			mac.Max = mac.Min
 		}
+	case "list":
+		seq := r.FormValue("seq") == "on"
+		file, _, err := r.FormFile("file")
+		if err == nil {
+			defer file.Close()
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				mac.Values = append(mac.Values, scanner.Text())
+			}
+		}
+		mac.Sequential = seq
 	}
 	app.Macros = append(app.Macros, mac)
 	http.Redirect(w, r, "/macros", http.StatusFound)
@@ -721,6 +735,17 @@ func macroValue(m *Macro) string {
 				b.WriteByte(m.Chars[rand.Intn(len(m.Chars))])
 			}
 			m.Last = b.String()
+		case "list":
+			if len(m.Values) > 0 {
+				if m.Sequential {
+					m.Last = m.Values[m.Index%len(m.Values)]
+					m.Index++
+				} else {
+					m.Last = m.Values[rand.Intn(len(m.Values))]
+				}
+			} else {
+				m.Last = ""
+			}
 		}
 	}
 	m.Used++
