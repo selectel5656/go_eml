@@ -1,0 +1,12 @@
+{{define "content"}}
+<h2>Аккаунты API</h2>
+<form method="POST" action="/accounts/add">
+    <input type="text" name="account" placeholder="login:apikey">
+    <input type="submit" value="Добавить">
+</form>
+<ul>
+    {{range $i, $a := .Accounts}}
+    <li>{{$a}} <a href="/accounts/delete?i={{$i}}">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}

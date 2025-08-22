@@ -1,0 +1,12 @@
+{{define "content"}}
+<h2>База e-mail</h2>
+<form method="POST" action="/emails/add">
+    <input type="text" name="email" placeholder="login@domain.com">
+    <input type="submit" value="Добавить">
+</form>
+<ul>
+    {{range $i, $e := .Emails}}
+    <li>{{$e}} <a href="/emails/delete?i={{$i}}">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}

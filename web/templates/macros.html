@@ -1,0 +1,12 @@
+{{define "content"}}
+<h2>Макросы</h2>
+<form method="POST" action="/macros/add">
+    <input type="text" name="macro" placeholder="{{$name}}">
+    <input type="submit" value="Добавить">
+</form>
+<ul>
+    {{range $i, $m := .Macros}}
+    <li>{{$m}} <a href="/macros/delete?i={{$i}}">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}

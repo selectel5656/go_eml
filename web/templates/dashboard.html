@@ -1,0 +1,15 @@
+{{define "content"}}
+<h2>Письмо</h2>
+<form method="POST" action="/send">
+    <label>Тема:</label><input type="text" name="subject"><br>
+    <label>Текст:</label><br>
+    <textarea name="body" rows="5" cols="60"></textarea><br>
+    <label>Аттачи:</label>
+    <select name="attachment">
+        {{range .Attachments}}
+        <option value="{{.}}">{{.}}</option>
+        {{end}}
+    </select><br>
+    <input type="submit" value="Отправить (фейк)">
+</form>
+{{end}}

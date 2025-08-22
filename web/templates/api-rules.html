@@ -1,0 +1,7 @@
+{{define "content"}}
+<h2>API правила</h2>
+<form method="POST" action="/api-rules/save">
+    <textarea name="rules" rows="5" cols="60">{{.APIRules}}</textarea><br>
+    <input type="submit" value="Сохранить">
+</form>
+{{end}}

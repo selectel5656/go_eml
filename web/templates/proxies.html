@@ -1,0 +1,12 @@
+{{define "content"}}
+<h2>Прокси</h2>
+<form method="POST" action="/proxies/add">
+    <input type="text" name="proxy" placeholder="ip:port">
+    <input type="submit" value="Добавить">
+</form>
+<ul>
+    {{range $i, $p := .Proxies}}
+    <li>{{$p}} <a href="/proxies/delete?i={{$i}}">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}
