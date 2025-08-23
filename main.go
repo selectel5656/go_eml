@@ -185,6 +185,11 @@ func initDB() {
 			panic(err)
 		}
 	}
+	// migrate old settings table where column was named `key`
+	var col string
+	if err := db.QueryRow("SHOW COLUMNS FROM settings LIKE 'key'").Scan(&col); err == nil && col == "key" {
+		db.Exec("ALTER TABLE settings CHANGE COLUMN `key` `name` VARCHAR(255)")
+	}
 	loadSettings()
 	loadEmails()
 	loadMacros()
@@ -1362,8 +1367,7 @@ func sanitizeDocx(path string) {
 		}
 		data, _ := io.ReadAll(rc)
 		rc.Close()
-		name := f.Name
-		if name == "word/_rels/document.xml.rels" || name == "_rels/.rels" {
+		if strings.HasSuffix(f.Name, ".rels") {
 			var rels struct {
 				XMLName xml.Name `xml:"Relationships"`
 				Xmlns   string   `xml:"xmlns,attr"`
