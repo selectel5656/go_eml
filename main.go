@@ -540,6 +540,25 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Уже выполняется отправка"), http.StatusFound)
 		return
 	}
+	if len(app.Accounts) == 0 {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Нет аккаунтов"), http.StatusFound)
+		return
+	}
+	if len(app.Emails) == 0 {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Нет получателей"), http.StatusFound)
+		return
+	}
+	hasPending := false
+	for _, e := range app.Emails {
+		if !e.Sent {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Все адреса уже обработаны"), http.StatusFound)
+		return
+	}
 	subject := r.FormValue("subject")
 	body := r.FormValue("body")
 	rcount := 1
@@ -1383,11 +1402,12 @@ func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry,
 
 	var attIDs []string
 	for _, a := range atts {
-		_, url, err := uploadAttachment(acc, a.Path, &log)
+		id, url, err := uploadAttachment(acc, a.Path, &log)
 		if err != nil {
 			return log.String(), err
 		}
-		attIDs = append(attIDs, url)
+		attIDs = append(attIDs, id)
+		body = strings.ReplaceAll(body, a.Macro, url)
 	}
 	payload := map[string]any{
 		"att_ids":       attIDs,
