@@ -238,25 +238,49 @@ func loadSettings() {
 	}
 }
 
-func saveSetting(k, v string) {
-	db.Exec("INSERT INTO settings(name,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", k, v)
+func saveSetting(k, v string) error {
+	_, err := db.Exec("INSERT INTO settings(name,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", k, v)
+	return err
 }
 
-func saveSettings() {
-	saveSetting("domain", app.Domain)
-	saveSetting("user_agent", app.UserAgent)
-	saveSetting("admin_pass", app.AdminPass)
-	saveSetting("send_per_account", strconv.Itoa(app.SendPerAccount))
-	if app.CycleAccounts {
-		saveSetting("cycle_accounts", "1")
-	} else {
-		saveSetting("cycle_accounts", "0")
+func saveSettings() error {
+	if err := saveSetting("domain", app.Domain); err != nil {
+		return err
 	}
-	saveSetting("threads", strconv.Itoa(app.Threads))
-	saveSetting("api_rules", app.APIRules)
-	saveSetting("test_email", app.TestEmail)
-	saveSetting("test_every", strconv.Itoa(app.TestEvery))
-	saveSetting("total_sent", strconv.Itoa(app.TotalSent))
+	if err := saveSetting("user_agent", app.UserAgent); err != nil {
+		return err
+	}
+	if err := saveSetting("admin_pass", app.AdminPass); err != nil {
+		return err
+	}
+	if err := saveSetting("send_per_account", strconv.Itoa(app.SendPerAccount)); err != nil {
+		return err
+	}
+	if app.CycleAccounts {
+		if err := saveSetting("cycle_accounts", "1"); err != nil {
+			return err
+		}
+	} else {
+		if err := saveSetting("cycle_accounts", "0"); err != nil {
+			return err
+		}
+	}
+	if err := saveSetting("threads", strconv.Itoa(app.Threads)); err != nil {
+		return err
+	}
+	if err := saveSetting("api_rules", app.APIRules); err != nil {
+		return err
+	}
+	if err := saveSetting("test_email", app.TestEmail); err != nil {
+		return err
+	}
+	if err := saveSetting("test_every", strconv.Itoa(app.TestEvery)); err != nil {
+		return err
+	}
+	if err := saveSetting("total_sent", strconv.Itoa(app.TotalSent)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func loadEmails() {
@@ -1069,6 +1093,7 @@ func handleAPIRulesSave(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleSettings(w http.ResponseWriter, r *http.Request) {
+	loadSettings()
 	data := map[string]any{
 		"Title":          "Настройки",
 		"Domain":         app.Domain,
@@ -1113,7 +1138,11 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	if p := r.FormValue("password"); p != "" {
 		app.AdminPass = p
 	}
-	saveSettings()
+	msg := "Сохранено"
+	if err := saveSettings(); err != nil {
+		msg = "Ошибка сохранения: " + err.Error()
+	}
+	loadSettings()
 	data := map[string]any{
 		"Title":          "Настройки",
 		"Domain":         app.Domain,
@@ -1123,7 +1152,7 @@ func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"Threads":        app.Threads,
 		"TestEmail":      app.TestEmail,
 		"TestEvery":      app.TestEvery,
-		"Message":        "Сохранено",
+		"Message":        msg,
 	}
 	render(w, "settings", data)
 }
