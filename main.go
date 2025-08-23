@@ -443,6 +443,7 @@ func main() {
 	http.HandleFunc("/send/stop", requireAuth(handleSendStop))
 	http.HandleFunc("/progress", requireAuth(handleProgress))
 	http.HandleFunc("/errors", requireAuth(handleErrorsDownload))
+	http.HandleFunc("/logs/clear", requireAuth(handleLogsClear))
 	http.HandleFunc("/queue/reset", requireAuth(handleQueueReset))
 	http.HandleFunc("/emails", requireAuth(handleEmails))
 	http.HandleFunc("/emails/add", requireAuth(handleEmailsAdd))
@@ -633,6 +634,14 @@ func handleErrorsDownload(w http.ResponseWriter, r *http.Request) {
 	for _, e := range app.Errors {
 		fmt.Fprintln(w, e)
 	}
+}
+
+func handleLogsClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		app.LastLog = ""
+		app.Errors = nil
+	}
+	http.Redirect(w, r, "/dashboard", http.StatusFound)
 }
 
 func nextBatch(rcount int) []int {

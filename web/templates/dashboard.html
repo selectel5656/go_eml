@@ -49,4 +49,7 @@
 
 <label>Лог запросов:</label>
 <textarea class="log" readonly>{{.Log}}</textarea>
+<form method="POST" action="/logs/clear">
+    <input type="submit" value="Очистить логи">
+</form>
 {{end}}
