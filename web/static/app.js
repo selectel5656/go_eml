@@ -8,18 +8,25 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!confirm('Удалить?')) e.preventDefault();
     });
   });
-  const typeSel = document.getElementById('att-type');
-  if (typeSel) {
-    const imgOpts = document.getElementById('image-opts');
-    const docxOpts = document.getElementById('docx-opts');
-    const toggle = () => {
-      const v = typeSel.value;
-      imgOpts.style.display = v === 'image' ? 'block' : 'none';
-      docxOpts.style.display = v === 'docx' ? 'block' : 'none';
-    };
-    typeSel.addEventListener('change', toggle);
-    toggle();
-  }
+    const typeSel = document.getElementById('att-type');
+    if (typeSel) {
+      const imgOpts = document.getElementById('image-opts');
+      const docxOpts = document.getElementById('docx-opts');
+      const toggle = () => {
+        const v = typeSel.value;
+        imgOpts.style.display = v === 'image' ? 'block' : 'none';
+        docxOpts.style.display = v === 'docx' ? 'block' : 'none';
+      };
+      typeSel.addEventListener('change', toggle);
+      toggle();
+      const randCb = document.getElementById('rand-cb');
+      if (randCb) {
+        const randOpts = document.getElementById('rand-opts');
+        const t = () => { randOpts.style.display = randCb.checked ? 'block' : 'none'; };
+        randCb.addEventListener('change', t);
+        t();
+      }
+    }
 
   const macroType = document.getElementById('macro-type');
   if (macroType) {

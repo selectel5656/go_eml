@@ -12,8 +12,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"io/fs"
 	"math/rand"
@@ -100,6 +107,8 @@ var (
 	emailMu   sync.Mutex
 	proxyMu   sync.Mutex
 )
+
+var ErrNoAccounts = errors.New("аккаунты закончились")
 
 type EmailEntry struct {
 	Name       string
@@ -701,6 +710,12 @@ func worker(subject, body string, atts []Attachment, rcount int, method string, 
 			}
 		}
 		emailMu.Unlock()
+		if err != nil {
+			if errors.Is(err, ErrNoAccounts) {
+				app.Stop = true
+				return
+			}
+		}
 	}
 }
 
@@ -873,6 +888,13 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 			if inline && att.Mime != "" {
 				att.Inline = true
 				att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
+			}
+			if r.FormValue("randomize") == "on" && att.Mime != "" {
+				params := map[string]int{}
+				for _, k := range []string{"left_min", "left_max", "right_min", "right_max", "top_min", "top_max", "bottom_min", "bottom_max", "dots_min", "dots_max"} {
+					params[k], _ = strconv.Atoi(r.FormValue(k))
+				}
+				randomizeImage(path, att.Mime, params)
 			}
 		case "docx":
 			att.Mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1312,9 +1334,10 @@ func sanitizeDocx(path string) {
 		data, _ := io.ReadAll(rc)
 		rc.Close()
 		name := f.Name
-		if name == "word/_rels/document.xml.rels" {
+		if name == "word/_rels/document.xml.rels" || name == "_rels/.rels" {
 			var rels struct {
 				XMLName xml.Name `xml:"Relationships"`
+				Xmlns   string   `xml:"xmlns,attr"`
 				Rels    []struct {
 					ID     string `xml:"Id,attr"`
 					Type   string `xml:"Type,attr"`
@@ -1345,6 +1368,65 @@ func sanitizeDocx(path string) {
 	out.Close()
 	os.Remove(path)
 	os.Rename(tmp, path)
+}
+
+func randomizeImage(path string, mime string, params map[string]int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	img, _, err := image.Decode(file)
+	file.Close()
+	if err != nil {
+		return err
+	}
+	w := img.Bounds().Dx()
+	h := img.Bounds().Dy()
+	left := randInRange(params["left_min"], params["left_max"])
+	right := randInRange(params["right_min"], params["right_max"])
+	top := randInRange(params["top_min"], params["top_max"])
+	bottom := randInRange(params["bottom_min"], params["bottom_max"])
+	canvas := image.NewRGBA(image.Rect(0, 0, w+left+right, h+top+bottom))
+	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	draw.Draw(canvas, image.Rect(left, top, left+w, top+h), img, image.Point{}, draw.Over)
+	dots := randInRange(params["dots_min"], params["dots_max"])
+	palette := []color.Color{
+		color.Black, color.White,
+		color.RGBA{255, 0, 0, 255}, color.RGBA{0, 255, 0, 255}, color.RGBA{0, 0, 255, 255},
+		color.RGBA{255, 255, 0, 255}, color.RGBA{0, 255, 255, 255}, color.RGBA{255, 0, 255, 255},
+		color.RGBA{128, 0, 0, 255}, color.RGBA{0, 128, 0, 255}, color.RGBA{0, 0, 128, 255},
+		color.RGBA{128, 128, 0, 255}, color.RGBA{0, 128, 128, 255}, color.RGBA{128, 0, 128, 255},
+		color.RGBA{192, 192, 192, 255}, color.RGBA{128, 128, 128, 255},
+	}
+	for i := 0; i < dots; i++ {
+		x := rand.Intn(canvas.Bounds().Dx())
+		y := rand.Intn(canvas.Bounds().Dy())
+		canvas.Set(x, y, palette[rand.Intn(len(palette))])
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	switch mime {
+	case "image/png":
+		err = png.Encode(out, canvas)
+	case "image/gif":
+		err = gif.Encode(out, canvas, nil)
+	default:
+		err = jpeg.Encode(out, canvas, &jpeg.Options{Quality: 90})
+	}
+	return err
+}
+
+func randInRange(min, max int) int {
+	if max < min {
+		max = min
+	}
+	if max == min {
+		return min
+	}
+	return min + rand.Intn(max-min+1)
 }
 
 func checkAccount(acc *Account, log *strings.Builder) error {
@@ -1408,7 +1490,7 @@ func generateOperationID(acc *Account, log *strings.Builder) (string, error) {
 func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry, method string, firstSep bool) (string, error) {
 	var log strings.Builder
 	if len(app.Accounts) == 0 {
-		return log.String(), fmt.Errorf("нет аккаунтов")
+		return log.String(), ErrNoAccounts
 	}
 	if len(recipients) == 0 {
 		return log.String(), fmt.Errorf("нет получателей")
@@ -1434,7 +1516,7 @@ func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry,
 	}
 	if acc == nil {
 		accountMu.Unlock()
-		return log.String(), fmt.Errorf("аккаунты закончились")
+		return log.String(), ErrNoAccounts
 	}
 	if acc.Proxy == "" {
 		acc.Proxy = getProxy()

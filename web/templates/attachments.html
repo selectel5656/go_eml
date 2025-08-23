@@ -10,6 +10,15 @@
     </select>
     <div id="image-opts">
         <label><input type="checkbox" name="inline">Использовать внутри письма (для картинок)</label>
+        <br>
+        <label><input type="checkbox" name="randomize" id="rand-cb">Рандомизация</label>
+        <div id="rand-opts" style="display:none">
+            Отступ слева от <input type="number" name="left_min" value="0" style="width:60px"> до <input type="number" name="left_max" value="0" style="width:60px"><br>
+            Отступ справа от <input type="number" name="right_min" value="0" style="width:60px"> до <input type="number" name="right_max" value="0" style="width:60px"><br>
+            Отступ сверху от <input type="number" name="top_min" value="0" style="width:60px"> до <input type="number" name="top_max" value="0" style="width:60px"><br>
+            Отступ снизу от <input type="number" name="bottom_min" value="0" style="width:60px"> до <input type="number" name="bottom_max" value="0" style="width:60px"><br>
+            Точек от <input type="number" name="dots_min" value="0" style="width:60px"> до <input type="number" name="dots_max" value="0" style="width:60px">
+        </div>
     </div>
     <div id="docx-opts" style="display:none">
         <label>Страниц от <input type="number" name="pages_min" value="0" style="width:60px"></label>
