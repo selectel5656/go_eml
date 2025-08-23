@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -10,6 +11,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
@@ -20,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,7 +31,6 @@ import (
 
 	"baliance.com/gooxml/document"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/jung-kurt/gofpdf"
 )
 
 //go:embed web/templates/*.html
@@ -874,6 +876,7 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 			}
 		case "docx":
 			att.Mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+			sanitizeDocx(path)
 			min, _ := strconv.Atoi(r.FormValue("pages_min"))
 			max, _ := strconv.Atoi(r.FormValue("pages_max"))
 			if max < min {
@@ -895,29 +898,20 @@ func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
 				doc.SaveToFile(path)
 			}
 			if r.FormValue("convert_pdf") == "on" {
-				pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
-				pdf := gofpdf.New("P", "mm", "A4", "")
-				pdf.SetTitle(att.Name, true)
-				author := replaceMacros(r.FormValue("pdf_author"))
-				if author != "" {
-					pdf.SetAuthor(author, true)
-				}
-				pdf.SetCreationDate(time.Now().Add(-time.Duration(rand.Intn(365*24)) * time.Hour))
-				for i := 0; i < extra+1; i++ {
-					pdf.AddPage()
-					pdf.SetFont("Arial", "", 12)
-					if i == extra {
-						pdf.MultiCell(0, 10, content, "", "", false)
-					} else {
-						pdf.MultiCell(0, 10, fmt.Sprintf("Page %d", i+1), "", "", false)
+				outDir := filepath.Dir(path)
+				cmd := exec.Command("libreoffice", "--headless", "--convert-to", "pdf", "--outdir", outDir, path)
+				if err := cmd.Run(); err == nil {
+					pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
+					if _, err := os.Stat(pdfPath); err == nil {
+						os.Remove(path)
+						path = pdfPath
+						att.Path = path
+						att.Name = strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
+						att.Mime = "application/pdf"
 					}
+				} else {
+					app.Errors = append(app.Errors, fmt.Sprintf("pdf convert: %v", err))
 				}
-				pdf.OutputFileAndClose(pdfPath)
-				os.Remove(path)
-				path = pdfPath
-				att.Path = path
-				att.Name = strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
-				att.Mime = "application/pdf"
 			}
 		case "pdf":
 			att.Mime = "application/pdf"
@@ -1292,6 +1286,65 @@ func replaceInline(body string, atts []Attachment) (string, error) {
 		}
 	}
 	return body, nil
+}
+
+func sanitizeDocx(path string) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return
+	}
+	defer r.Close()
+	tmp := path + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return
+	}
+	w := zip.NewWriter(out)
+	removeType := "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
+	for _, f := range r.File {
+		if f.Name == "word/stylesWithEffects.xml" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		name := f.Name
+		if name == "word/_rels/document.xml.rels" {
+			var rels struct {
+				XMLName xml.Name `xml:"Relationships"`
+				Rels    []struct {
+					ID     string `xml:"Id,attr"`
+					Type   string `xml:"Type,attr"`
+					Target string `xml:"Target,attr"`
+				} `xml:"Relationship"`
+			}
+			if err := xml.Unmarshal(data, &rels); err == nil {
+				filtered := rels.Rels[:0]
+				for _, r := range rels.Rels {
+					if r.Type != removeType {
+						filtered = append(filtered, r)
+					}
+				}
+				rels.Rels = filtered
+				data, _ = xml.Marshal(rels)
+				data = append([]byte(xml.Header), data...)
+			}
+		}
+		fh := f.FileHeader
+		fh.Method = zip.Deflate
+		wfh, err := w.CreateHeader(&fh)
+		if err != nil {
+			continue
+		}
+		wfh.Write(data)
+	}
+	w.Close()
+	out.Close()
+	os.Remove(path)
+	os.Rename(tmp, path)
 }
 
 func checkAccount(acc *Account, log *strings.Builder) error {
