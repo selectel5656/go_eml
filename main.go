@@ -1,0 +1,1697 @@
+package main
+
+import (
+	"archive/zip"
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"context"
+	"database/sql"
+	"embed"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"html/template"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"io/fs"
+	"math/rand"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"baliance.com/gooxml/document"
+	_ "github.com/go-sql-driver/mysql"
+)
+
+//go:embed web/templates/*.html
+var templateFS embed.FS
+
+//go:embed web/static/*
+var staticFS embed.FS
+
+var staticFiles fs.FS
+
+var (
+	templates = map[string]*template.Template{}
+	loginTmpl *template.Template
+	db        *sql.DB
+)
+
+func init() {
+	pages := []string{"dashboard", "emails", "macros", "attachments", "api-rules", "proxies", "accounts", "settings"}
+	for _, p := range pages {
+		templates[p] = template.Must(template.ParseFS(templateFS, "web/templates/layout.html", "web/templates/"+p+".html"))
+	}
+	loginTmpl = template.Must(template.ParseFS(templateFS, "web/templates/login.html"))
+
+	staticFiles, _ = fs.Sub(staticFS, "web/static")
+	rand.Seed(time.Now().UnixNano())
+}
+
+type App struct {
+	Domain    string
+	UserAgent string
+	AdminPass string
+	TestEmail string
+	TestEvery int
+	TotalSent int
+
+	Emails      []EmailEntry
+	Macros      []Macro
+	Attachments []Attachment
+	Proxies     []Proxy
+	Accounts    []Account
+	APIRules    string
+
+	SendPerAccount int
+	CycleAccounts  bool
+	CurrentAccount int
+
+	Threads int
+	Sending bool
+	Stop    bool
+
+	LastLog string
+	Errors  []string
+}
+
+var app = &App{
+	Domain:         "domen.ru",
+	UserAgent:      "MyUserAgent",
+	AdminPass:      "admin",
+	SendPerAccount: 1,
+	CycleAccounts:  true,
+	Threads:        1,
+	TestEvery:      0,
+}
+
+var (
+	accountMu sync.Mutex
+	emailMu   sync.Mutex
+	proxyMu   sync.Mutex
+)
+
+var ErrNoAccounts = errors.New("аккаунты закончились")
+
+type EmailEntry struct {
+	Name       string
+	Email      string
+	Sent       bool
+	Processing bool
+}
+
+type Attachment struct {
+	Name        string
+	Macro       string
+	Path        string
+	Inline      bool
+	InlineMacro string
+	Mime        string
+}
+
+type Macro struct {
+	Name       string
+	Type       string
+	Counter    int
+	Step       int
+	Chars      string
+	Min        int
+	Max        int
+	Every      int
+	Used       int
+	Last       string
+	Values     []string
+	Sequential bool
+	Index      int
+	Expr       string
+	Encoding   string
+}
+
+type Proxy struct {
+	Address string
+	Alive   bool
+	Used    bool
+}
+
+type Account struct {
+	Login     string
+	Password  string
+	FirstName string
+	LastName  string
+	APIKey    string
+	UUID      string
+	Sent      int
+	Proxy     string
+	InUse     bool
+}
+
+func initDB() {
+	dsn := os.Getenv("MYSQL_DSN")
+	if dsn == "" {
+		dsn = "root:password@tcp(127.0.0.1:3306)/go_eml?parseTime=true"
+	}
+	var err error
+	db, err = sql.Open("mysql", dsn)
+	if err != nil {
+		panic(err)
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS settings (name VARCHAR(255) PRIMARY KEY, value TEXT)`,
+		`CREATE TABLE IF NOT EXISTS emails (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), email VARCHAR(255), sent TINYINT(1))`,
+		`CREATE TABLE IF NOT EXISTS macros (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), type VARCHAR(50), counter INT, step INT, chars TEXT, min INT, max INT, every INT, used INT, last TEXT, vals TEXT, sequential TINYINT(1), idx INT, expr TEXT, encoding VARCHAR(20))`,
+		`CREATE TABLE IF NOT EXISTS attachments (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255), macro VARCHAR(255), path TEXT, inline TINYINT(1), inline_macro VARCHAR(255), mime VARCHAR(100))`,
+		`CREATE TABLE IF NOT EXISTS proxies (address VARCHAR(255) PRIMARY KEY, alive TINYINT(1), used TINYINT(1))`,
+		`CREATE TABLE IF NOT EXISTS accounts (login VARCHAR(255) PRIMARY KEY, password VARCHAR(255), first_name VARCHAR(255), last_name VARCHAR(255), api_key TEXT, uuid VARCHAR(255), sent INT, proxy VARCHAR(255))`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			panic(err)
+		}
+	}
+	// migrate old settings table where column was named `key`
+	var col string
+	if err := db.QueryRow("SHOW COLUMNS FROM settings LIKE 'key'").Scan(&col); err == nil && col == "key" {
+		db.Exec("ALTER TABLE settings CHANGE COLUMN `key` `name` VARCHAR(255)")
+	}
+	loadSettings()
+	loadEmails()
+	loadMacros()
+	loadAttachments()
+	loadProxies()
+	loadAccounts()
+}
+
+func loadSettings() {
+	rows, err := db.Query("SELECT name, value FROM settings")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		rows.Scan(&k, &v)
+		switch k {
+		case "domain":
+			app.Domain = v
+		case "user_agent":
+			app.UserAgent = v
+		case "admin_pass":
+			app.AdminPass = v
+		case "send_per_account":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.SendPerAccount = n
+			}
+		case "cycle_accounts":
+			app.CycleAccounts = v == "1"
+		case "threads":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.Threads = n
+			}
+		case "api_rules":
+			app.APIRules = v
+		case "test_email":
+			app.TestEmail = v
+		case "test_every":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.TestEvery = n
+			}
+		case "total_sent":
+			if n, err := strconv.Atoi(v); err == nil {
+				app.TotalSent = n
+			}
+		}
+	}
+	if app.AdminPass == "" {
+		app.AdminPass = "admin"
+	}
+}
+
+func saveSetting(k, v string) error {
+	_, err := db.Exec("INSERT INTO settings(name,value) VALUES(?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", k, v)
+	return err
+}
+
+func saveSettings() error {
+	if err := saveSetting("domain", app.Domain); err != nil {
+		return err
+	}
+	if err := saveSetting("user_agent", app.UserAgent); err != nil {
+		return err
+	}
+	if err := saveSetting("admin_pass", app.AdminPass); err != nil {
+		return err
+	}
+	if err := saveSetting("send_per_account", strconv.Itoa(app.SendPerAccount)); err != nil {
+		return err
+	}
+	if app.CycleAccounts {
+		if err := saveSetting("cycle_accounts", "1"); err != nil {
+			return err
+		}
+	} else {
+		if err := saveSetting("cycle_accounts", "0"); err != nil {
+			return err
+		}
+	}
+	if err := saveSetting("threads", strconv.Itoa(app.Threads)); err != nil {
+		return err
+	}
+	if err := saveSetting("api_rules", app.APIRules); err != nil {
+		return err
+	}
+	if err := saveSetting("test_email", app.TestEmail); err != nil {
+		return err
+	}
+	if err := saveSetting("test_every", strconv.Itoa(app.TestEvery)); err != nil {
+		return err
+	}
+	if err := saveSetting("total_sent", strconv.Itoa(app.TotalSent)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func loadEmails() {
+	rows, err := db.Query("SELECT name,email,sent FROM emails")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e EmailEntry
+		var sent int
+		rows.Scan(&e.Name, &e.Email, &sent)
+		e.Sent = sent == 1
+		app.Emails = append(app.Emails, e)
+	}
+}
+
+func loadMacros() {
+	rows, err := db.Query("SELECT name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx,expr,encoding FROM macros")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m Macro
+		var vals, expr, enc string
+		var seq, idx int
+		rows.Scan(&m.Name, &m.Type, &m.Counter, &m.Step, &m.Chars, &m.Min, &m.Max, &m.Every, &m.Used, &m.Last, &vals, &seq, &idx, &expr, &enc)
+		json.Unmarshal([]byte(vals), &m.Values)
+		m.Sequential = seq == 1
+		m.Index = idx
+		m.Expr = expr
+		m.Encoding = enc
+		app.Macros = append(app.Macros, m)
+	}
+}
+
+func loadAttachments() {
+	rows, err := db.Query("SELECT name,macro,path,inline,inline_macro,mime FROM attachments")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var att Attachment
+		var inline int
+		rows.Scan(&att.Name, &att.Macro, &att.Path, &inline, &att.InlineMacro, &att.Mime)
+		att.Inline = inline == 1
+		app.Attachments = append(app.Attachments, att)
+	}
+}
+
+func loadProxies() {
+	rows, err := db.Query("SELECT address,alive,used FROM proxies")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p Proxy
+		var alive, used int
+		rows.Scan(&p.Address, &alive, &used)
+		p.Alive = alive == 1
+		p.Used = used == 1
+		app.Proxies = append(app.Proxies, p)
+	}
+}
+
+func loadAccounts() {
+	rows, err := db.Query("SELECT login,password,first_name,last_name,api_key,uuid,sent,proxy FROM accounts")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a Account
+		rows.Scan(&a.Login, &a.Password, &a.FirstName, &a.LastName, &a.APIKey, &a.UUID, &a.Sent, &a.Proxy)
+		app.Accounts = append(app.Accounts, a)
+	}
+}
+
+func checkProxy(addr string) bool {
+	proxyURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		return false
+	}
+	tr := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	resp, err := client.Get("https://api.ipify.org?format=json")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func getProxy() string {
+	proxyMu.Lock()
+	defer proxyMu.Unlock()
+	for i := range app.Proxies {
+		if app.Proxies[i].Alive && !app.Proxies[i].Used {
+			app.Proxies[i].Used = true
+			db.Exec("UPDATE proxies SET used=1 WHERE address=?", app.Proxies[i].Address)
+			return app.Proxies[i].Address
+		}
+	}
+	for i := range app.Proxies {
+		app.Proxies[i].Used = false
+		db.Exec("UPDATE proxies SET used=0 WHERE address=?", app.Proxies[i].Address)
+	}
+	for i := range app.Proxies {
+		if app.Proxies[i].Alive {
+			app.Proxies[i].Used = true
+			db.Exec("UPDATE proxies SET used=1 WHERE address=?", app.Proxies[i].Address)
+			return app.Proxies[i].Address
+		}
+	}
+	return ""
+}
+
+func doLoggedRequest(log *strings.Builder, req *http.Request, body []byte, proxy string) (int, []byte, error) {
+	log.WriteString(fmt.Sprintf("%s %s\n", req.Method, req.URL.String()))
+	for k, v := range req.Header {
+		log.WriteString(fmt.Sprintf("%s: %s\n", k, strings.Join(v, ",")))
+	}
+	if len(body) > 0 {
+		log.WriteString("Body:\n" + string(body) + "\n")
+	}
+	tr := &http.Transport{}
+	if proxy != "" {
+		if purl, err := url.Parse("http://" + proxy); err == nil {
+			tr.Proxy = http.ProxyURL(purl)
+		}
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: tr}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.WriteString("Error: " + err.Error() + "\n")
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	reader := resp.Body
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		if gr, err := gzip.NewReader(resp.Body); err == nil {
+			defer gr.Close()
+			reader = gr
+		}
+	case "deflate":
+		if zr, err := zlib.NewReader(resp.Body); err == nil {
+			defer zr.Close()
+			reader = zr
+		}
+	}
+
+	respBody, _ := io.ReadAll(reader)
+	log.WriteString(fmt.Sprintf("Response %d\n%s\n", resp.StatusCode, string(respBody)))
+	return resp.StatusCode, respBody, nil
+}
+
+func cloneRequest(req *http.Request, body []byte) *http.Request {
+	r := req.Clone(context.Background())
+	if body != nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	return r
+}
+
+func doAccountRequest(acc *Account, log *strings.Builder, req *http.Request, body []byte) (int, []byte, error) {
+	for i := 0; i < 3; i++ {
+		r := cloneRequest(req, body)
+		status, resp, err := doLoggedRequest(log, r, body, acc.Proxy)
+		if err == nil {
+			return status, resp, nil
+		}
+		log.WriteString("proxy failed, switching\n")
+		acc.Proxy = getProxy()
+		db.Exec("UPDATE accounts SET proxy=? WHERE login=?", acc.Proxy, acc.Login)
+		if acc.Proxy == "" {
+			break
+		}
+	}
+	return 0, nil, fmt.Errorf("proxy error")
+}
+
+func main() {
+	initDB()
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
+	http.HandleFunc("/", handleRoot)
+	http.HandleFunc("/login", handleLogin)
+	http.HandleFunc("/logout", handleLogout)
+	http.HandleFunc("/dashboard", requireAuth(handleDashboard))
+	http.HandleFunc("/send", requireAuth(handleSend))
+	http.HandleFunc("/send/stop", requireAuth(handleSendStop))
+	http.HandleFunc("/progress", requireAuth(handleProgress))
+	http.HandleFunc("/errors", requireAuth(handleErrorsDownload))
+	http.HandleFunc("/logs/clear", requireAuth(handleLogsClear))
+	http.HandleFunc("/queue/reset", requireAuth(handleQueueReset))
+	http.HandleFunc("/emails", requireAuth(handleEmails))
+	http.HandleFunc("/emails/add", requireAuth(handleEmailsAdd))
+	http.HandleFunc("/emails/upload", requireAuth(handleEmailsUpload))
+	http.HandleFunc("/emails/delete", requireAuth(handleEmailsDelete))
+	http.HandleFunc("/emails/reset", requireAuth(handleEmailsReset))
+	http.HandleFunc("/macros", requireAuth(handleMacros))
+	http.HandleFunc("/macros/add", requireAuth(handleMacrosAdd))
+	http.HandleFunc("/macros/delete", requireAuth(handleMacrosDelete))
+	http.HandleFunc("/attachments", requireAuth(handleAttachments))
+	http.HandleFunc("/attachments/add", requireAuth(handleAttachmentsAdd))
+	http.HandleFunc("/attachments/delete", requireAuth(handleAttachmentsDelete))
+	http.HandleFunc("/proxies", requireAuth(handleProxies))
+	http.HandleFunc("/proxies/add", requireAuth(handleProxiesAdd))
+	http.HandleFunc("/proxies/upload", requireAuth(handleProxiesUpload))
+	http.HandleFunc("/proxies/delete", requireAuth(handleProxiesDelete))
+	http.HandleFunc("/accounts", requireAuth(handleAccounts))
+	http.HandleFunc("/accounts/add", requireAuth(handleAccountsAdd))
+	http.HandleFunc("/accounts/upload", requireAuth(handleAccountsUpload))
+	http.HandleFunc("/accounts/delete", requireAuth(handleAccountsDelete))
+	http.HandleFunc("/accounts/reset", requireAuth(handleAccountsReset))
+	http.HandleFunc("/api-rules", requireAuth(handleAPIRules))
+	http.HandleFunc("/api-rules/save", requireAuth(handleAPIRulesSave))
+	http.HandleFunc("/settings", requireAuth(handleSettings))
+	http.HandleFunc("/settings/save", requireAuth(handleSettingsSave))
+
+	http.ListenAndServe(":8080", nil)
+}
+
+func render(w http.ResponseWriter, name string, data any) {
+	if t, ok := templates[name]; ok {
+		t.ExecuteTemplate(w, "layout", data)
+		return
+	}
+	http.Error(w, "template not found", http.StatusInternalServerError)
+}
+
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		user := r.FormValue("username")
+		pass := r.FormValue("password")
+		if user == "admin" && pass == app.AdminPass {
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "1", Path: "/"})
+			http.Redirect(w, r, "/dashboard", http.StatusFound)
+			return
+		}
+		loginTmpl.ExecuteTemplate(w, "login.html", map[string]any{"Error": "Неверные данные"})
+		return
+	}
+	loginTmpl.ExecuteTemplate(w, "login.html", nil)
+}
+
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "session", Value: "", Path: "/", MaxAge: -1})
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func requireAuth(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("session")
+		if err != nil || c.Value != "1" {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		fn(w, r)
+	}
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{
+		"Title":       "Письмо",
+		"Attachments": app.Attachments,
+		"Log":         app.LastLog,
+		"Sending":     app.Sending,
+	}
+	if msg := r.URL.Query().Get("msg"); msg != "" {
+		data["Message"] = msg
+	}
+	if errMsg := r.URL.Query().Get("err"); errMsg != "" {
+		data["Error"] = errMsg
+	}
+	render(w, "dashboard", data)
+}
+
+func handleSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+		return
+	}
+	if app.Sending {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Уже выполняется отправка"), http.StatusFound)
+		return
+	}
+	if len(app.Accounts) == 0 {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Нет аккаунтов"), http.StatusFound)
+		return
+	}
+	if len(app.Emails) == 0 {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Нет получателей"), http.StatusFound)
+		return
+	}
+	hasPending := false
+	for _, e := range app.Emails {
+		if !e.Sent {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		http.Redirect(w, r, "/dashboard?err="+url.QueryEscape("Все адреса уже обработаны"), http.StatusFound)
+		return
+	}
+	subject := r.FormValue("subject")
+	body := r.FormValue("body")
+	rcount := 1
+	if v := r.FormValue("rcount"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			rcount = n
+		}
+	}
+	rmethod := r.FormValue("rmethod")
+	if rmethod == "" {
+		rmethod = "to"
+	}
+	firstSep := r.FormValue("firstsep") == "on"
+	var atts []Attachment
+	for _, v := range r.Form["attach"] {
+		if i, err := strconv.Atoi(v); err == nil {
+			if i >= 0 && i < len(app.Attachments) {
+				atts = append(atts, app.Attachments[i])
+			}
+		}
+	}
+	app.Stop = false
+	app.Sending = true
+	go massSend(subject, body, atts, rcount, rmethod, firstSep)
+	http.Redirect(w, r, "/dashboard?msg="+url.QueryEscape("Отправка запущена"), http.StatusFound)
+}
+
+func handleSendStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		app.Stop = true
+	}
+	http.Redirect(w, r, "/dashboard", http.StatusFound)
+}
+
+func handleQueueReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		emailMu.Lock()
+		for i := range app.Emails {
+			app.Emails[i].Processing = false
+		}
+		emailMu.Unlock()
+	}
+	http.Redirect(w, r, "/dashboard", http.StatusFound)
+}
+
+func handleProgress(w http.ResponseWriter, r *http.Request) {
+	emailMu.Lock()
+	total := len(app.Emails)
+	sent := 0
+	processing := 0
+	for _, e := range app.Emails {
+		if e.Sent {
+			sent++
+		}
+		if e.Processing {
+			processing++
+		}
+	}
+	emailMu.Unlock()
+	res := map[string]any{
+		"total":      total,
+		"sent":       sent,
+		"processing": processing,
+		"errors":     len(app.Errors),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+func handleErrorsDownload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	for _, e := range app.Errors {
+		fmt.Fprintln(w, e)
+	}
+}
+
+func handleLogsClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		app.LastLog = ""
+		app.Errors = nil
+	}
+	http.Redirect(w, r, "/dashboard", http.StatusFound)
+}
+
+func nextBatch(rcount int) []int {
+	emailMu.Lock()
+	defer emailMu.Unlock()
+	idxs := []int{}
+	for i := range app.Emails {
+		if !app.Emails[i].Sent && !app.Emails[i].Processing {
+			app.Emails[i].Processing = true
+			idxs = append(idxs, i)
+			if len(idxs) == rcount {
+				break
+			}
+		}
+	}
+	return idxs
+}
+
+func worker(subject, body string, atts []Attachment, rcount int, method string, firstSep bool, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		if app.Stop {
+			return
+		}
+		idxs := nextBatch(rcount)
+		if len(idxs) == 0 {
+			return
+		}
+		emailMu.Lock()
+		batch := make([]EmailEntry, len(idxs))
+		for i, idx := range idxs {
+			batch[i] = app.Emails[idx]
+		}
+		emailMu.Unlock()
+		logs, err := sendEmail(subject, body, atts, batch, method, firstSep)
+		emailMu.Lock()
+		app.LastLog = logs
+		if err == nil {
+			for _, idx := range idxs {
+				app.Emails[idx].Sent = true
+				app.Emails[idx].Processing = false
+				db.Exec("UPDATE emails SET sent=1 WHERE email=?", app.Emails[idx].Email)
+			}
+			app.TotalSent++
+			saveSetting("total_sent", strconv.Itoa(app.TotalSent))
+			if app.TestEvery > 0 && app.TestEmail != "" && app.TotalSent%app.TestEvery == 0 {
+				testRecipient := []EmailEntry{{Name: "test", Email: app.TestEmail}}
+				logs, _ := sendEmail(subject, body, atts, testRecipient, "to", false)
+				app.LastLog += "\n--- test ---\n" + logs
+			}
+		} else {
+			app.Errors = append(app.Errors, logs+"\n"+err.Error())
+			for _, idx := range idxs {
+				app.Emails[idx].Processing = false
+			}
+		}
+		emailMu.Unlock()
+		if err != nil {
+			if errors.Is(err, ErrNoAccounts) {
+				app.Stop = true
+				return
+			}
+		}
+	}
+}
+
+func massSend(subject, body string, atts []Attachment, rcount int, method string, firstSep bool) {
+	app.Errors = nil
+	var wg sync.WaitGroup
+	for i := 0; i < app.Threads; i++ {
+		wg.Add(1)
+		go worker(subject, body, atts, rcount, method, firstSep, &wg)
+	}
+	wg.Wait()
+	app.Sending = false
+}
+
+func handleEmails(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{
+		"Title":  "База e-mail",
+		"Emails": app.Emails,
+	}
+	render(w, "emails", data)
+}
+
+func handleEmailsAdd(w http.ResponseWriter, r *http.Request) {
+	if e, ok := parseEmail(r.FormValue("email")); ok {
+		app.Emails = append(app.Emails, e)
+		db.Exec("INSERT INTO emails(name,email,sent) VALUES(?,?,0)", e.Name, e.Email)
+	}
+	http.Redirect(w, r, "/emails", http.StatusFound)
+}
+
+func handleEmailsUpload(w http.ResponseWriter, r *http.Request) {
+	format := r.FormValue("format")
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			if e, ok := parseEmailFormat(scanner.Text(), format); ok {
+				app.Emails = append(app.Emails, e)
+				db.Exec("INSERT INTO emails(name,email,sent) VALUES(?,?,0)", e.Name, e.Email)
+			}
+		}
+	}
+	http.Redirect(w, r, "/emails", http.StatusFound)
+}
+
+func handleEmailsDelete(w http.ResponseWriter, r *http.Request) {
+	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
+		if i >= 0 && i < len(app.Emails) {
+			db.Exec("DELETE FROM emails WHERE email=?", app.Emails[i].Email)
+			app.Emails = append(app.Emails[:i], app.Emails[i+1:]...)
+		}
+	}
+	http.Redirect(w, r, "/emails", http.StatusFound)
+}
+
+func handleEmailsReset(w http.ResponseWriter, r *http.Request) {
+	for i := range app.Emails {
+		app.Emails[i].Sent = false
+		app.Emails[i].Processing = false
+	}
+	db.Exec("UPDATE emails SET sent=0")
+	http.Redirect(w, r, "/emails", http.StatusFound)
+}
+
+func handleMacros(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{"Title": "Макросы", "Macros": app.Macros}
+	render(w, "macros", data)
+}
+
+func handleMacrosAdd(w http.ResponseWriter, r *http.Request) {
+	name := r.FormValue("name")
+	mtype := r.FormValue("type")
+	if name == "" || mtype == "" {
+		http.Redirect(w, r, "/macros", http.StatusFound)
+		return
+	}
+	mac := Macro{Name: name, Type: mtype, Every: 1}
+	if v := r.FormValue("every"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			mac.Every = n
+		}
+	}
+	switch mtype {
+	case "counter":
+		start, _ := strconv.Atoi(r.FormValue("start"))
+		step, _ := strconv.Atoi(r.FormValue("step"))
+		if step == 0 {
+			step = 1
+		}
+		mac.Counter = start
+		mac.Step = step
+		mac.Last = strconv.Itoa(start)
+	case "random":
+		mac.Chars = r.FormValue("chars")
+		mac.Min, _ = strconv.Atoi(r.FormValue("min"))
+		mac.Max, _ = strconv.Atoi(r.FormValue("max"))
+		if mac.Min <= 0 {
+			mac.Min = 1
+		}
+		if mac.Max < mac.Min {
+			mac.Max = mac.Min
+		}
+	case "list":
+		seq := r.FormValue("seq") == "on"
+		file, _, err := r.FormFile("file")
+		if err == nil {
+			defer file.Close()
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				mac.Values = append(mac.Values, scanner.Text())
+			}
+		}
+		mac.Sequential = seq
+	case "multi":
+		mac.Expr = r.FormValue("expr")
+		mac.Encoding = r.FormValue("encoding")
+	}
+	app.Macros = append(app.Macros, mac)
+	vals, _ := json.Marshal(mac.Values)
+	seq := 0
+	if mac.Sequential {
+		seq = 1
+	}
+	db.Exec("INSERT INTO macros(name,type,counter,step,chars,min,max,every,used,last,vals,sequential,idx,expr,encoding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		mac.Name, mac.Type, mac.Counter, mac.Step, mac.Chars, mac.Min, mac.Max, mac.Every, mac.Used, mac.Last, string(vals), seq, mac.Index, mac.Expr, mac.Encoding)
+	http.Redirect(w, r, "/macros", http.StatusFound)
+}
+
+func handleMacrosDelete(w http.ResponseWriter, r *http.Request) {
+	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
+		if i >= 0 && i < len(app.Macros) {
+			db.Exec("DELETE FROM macros WHERE name=?", app.Macros[i].Name)
+			app.Macros = append(app.Macros[:i], app.Macros[i+1:]...)
+		}
+	}
+	http.Redirect(w, r, "/macros", http.StatusFound)
+}
+
+func handleAttachments(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{"Title": "Аттачи", "Attachments": app.Attachments}
+	render(w, "attachments", data)
+}
+
+func handleAttachmentsAdd(w http.ResponseWriter, r *http.Request) {
+	file, header, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		os.MkdirAll("uploads", 0755)
+		id := len(app.Attachments) + 1
+		filename := fmt.Sprintf("%d_%s", id, header.Filename)
+		path := "uploads/" + filename
+		os.WriteFile(path, data, 0644)
+		macro := fmt.Sprintf("{{$attach_%d}}", id)
+		atype := r.FormValue("atype")
+		att := Attachment{Name: header.Filename, Macro: macro, Path: path}
+		switch atype {
+		case "image":
+			inline := r.FormValue("inline") == "on"
+			ext := strings.ToLower(filepath.Ext(header.Filename))
+			switch ext {
+			case ".png":
+				att.Mime = "image/png"
+			case ".jpg", ".jpeg":
+				att.Mime = "image/jpeg"
+			case ".gif":
+				att.Mime = "image/gif"
+			}
+			if inline && att.Mime != "" {
+				att.Inline = true
+				att.InlineMacro = fmt.Sprintf("{{$attach_img_%d_base64}}", id)
+			}
+			if r.FormValue("randomize") == "on" && att.Mime != "" {
+				params := map[string]int{}
+				for _, k := range []string{"left_min", "left_max", "right_min", "right_max", "top_min", "top_max", "bottom_min", "bottom_max", "dots_min", "dots_max"} {
+					params[k], _ = strconv.Atoi(r.FormValue(k))
+				}
+				randomizeImage(path, att.Mime, params)
+			}
+		case "docx":
+			att.Mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+			sanitizeDocx(path)
+			min, _ := strconv.Atoi(r.FormValue("pages_min"))
+			max, _ := strconv.Atoi(r.FormValue("pages_max"))
+			if max < min {
+				max = min
+			}
+			extra := min
+			if max > min {
+				extra = min + rand.Intn(max-min+1)
+			}
+			content := replaceMacros(r.FormValue("page_content"))
+			if doc, err := document.Open(path); err == nil {
+				for i := 0; i < extra; i++ {
+					para := doc.AddParagraph()
+					para.Properties().SetPageBreakBefore(true)
+					if i == extra-1 {
+						para.AddRun().AddText(content)
+					}
+				}
+				doc.SaveToFile(path)
+			}
+			if r.FormValue("convert_pdf") == "on" {
+				outDir := filepath.Dir(path)
+				cmd := exec.Command("libreoffice", "--headless", "--convert-to", "pdf", "--outdir", outDir, path)
+				if err := cmd.Run(); err == nil {
+					pdfPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".pdf"
+					if _, err := os.Stat(pdfPath); err == nil {
+						os.Remove(path)
+						path = pdfPath
+						att.Path = path
+						att.Name = strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
+						att.Mime = "application/pdf"
+					}
+				} else {
+					app.Errors = append(app.Errors, fmt.Sprintf("pdf convert: %v", err))
+				}
+			}
+		case "pdf":
+			att.Mime = "application/pdf"
+		default:
+			att.Mime = "application/octet-stream"
+		}
+		app.Attachments = append(app.Attachments, att)
+		in := 0
+		if att.Inline {
+			in = 1
+		}
+		db.Exec("INSERT INTO attachments(name,macro,path,inline,inline_macro,mime) VALUES(?,?,?,?,?,?)", att.Name, att.Macro, att.Path, in, att.InlineMacro, att.Mime)
+	}
+	http.Redirect(w, r, "/attachments", http.StatusFound)
+}
+
+func handleAttachmentsDelete(w http.ResponseWriter, r *http.Request) {
+	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
+		if i >= 0 && i < len(app.Attachments) {
+			os.Remove(app.Attachments[i].Path)
+			db.Exec("DELETE FROM attachments WHERE macro=?", app.Attachments[i].Macro)
+			app.Attachments = append(app.Attachments[:i], app.Attachments[i+1:]...)
+		}
+	}
+	http.Redirect(w, r, "/attachments", http.StatusFound)
+}
+
+func handleProxies(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{"Title": "Прокси", "Proxies": app.Proxies}
+	render(w, "proxies", data)
+}
+
+func handleProxiesAdd(w http.ResponseWriter, r *http.Request) {
+	if p := r.FormValue("proxy"); p != "" {
+		alive := checkProxy(p)
+		app.Proxies = append(app.Proxies, Proxy{Address: p, Alive: alive})
+		a := 0
+		if alive {
+			a = 1
+		}
+		db.Exec("INSERT INTO proxies(address,alive,used) VALUES(?,?,0)", p, a)
+	}
+	http.Redirect(w, r, "/proxies", http.StatusFound)
+}
+
+func handleProxiesUpload(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				alive := checkProxy(line)
+				app.Proxies = append(app.Proxies, Proxy{Address: line, Alive: alive})
+				a := 0
+				if alive {
+					a = 1
+				}
+				db.Exec("INSERT INTO proxies(address,alive,used) VALUES(?,?,0)", line, a)
+			}
+		}
+	}
+	http.Redirect(w, r, "/proxies", http.StatusFound)
+}
+
+func handleProxiesDelete(w http.ResponseWriter, r *http.Request) {
+	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
+		if i >= 0 && i < len(app.Proxies) {
+			db.Exec("DELETE FROM proxies WHERE address=?", app.Proxies[i].Address)
+			app.Proxies = append(app.Proxies[:i], app.Proxies[i+1:]...)
+		}
+	}
+	http.Redirect(w, r, "/proxies", http.StatusFound)
+}
+
+func handleAccounts(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{"Title": "Аккаунты API", "Accounts": app.Accounts}
+	render(w, "accounts", data)
+}
+
+func handleAccountsAdd(w http.ResponseWriter, r *http.Request) {
+	if a, ok := parseAccount(r.FormValue("account")); ok {
+		app.Accounts = append(app.Accounts, a)
+		db.Exec("INSERT INTO accounts(login,password,first_name,last_name,api_key,uuid,sent,proxy) VALUES(?,?,?,?,?,?,?,?)", a.Login, a.Password, a.FirstName, a.LastName, a.APIKey, a.UUID, a.Sent, a.Proxy)
+	}
+	http.Redirect(w, r, "/accounts", http.StatusFound)
+}
+
+func handleAccountsUpload(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			if a, ok := parseAccount(scanner.Text()); ok {
+				app.Accounts = append(app.Accounts, a)
+				db.Exec("INSERT INTO accounts(login,password,first_name,last_name,api_key,uuid,sent,proxy) VALUES(?,?,?,?,?,?,?,?)", a.Login, a.Password, a.FirstName, a.LastName, a.APIKey, a.UUID, a.Sent, a.Proxy)
+			}
+		}
+	}
+	http.Redirect(w, r, "/accounts", http.StatusFound)
+}
+
+func handleAccountsDelete(w http.ResponseWriter, r *http.Request) {
+	if i, err := strconv.Atoi(r.URL.Query().Get("i")); err == nil {
+		if i >= 0 && i < len(app.Accounts) {
+			db.Exec("DELETE FROM accounts WHERE login=?", app.Accounts[i].Login)
+			app.Accounts = append(app.Accounts[:i], app.Accounts[i+1:]...)
+		}
+	}
+	http.Redirect(w, r, "/accounts", http.StatusFound)
+}
+
+func handleAccountsReset(w http.ResponseWriter, r *http.Request) {
+	for i := range app.Accounts {
+		app.Accounts[i].Sent = 0
+	}
+	app.CurrentAccount = 0
+	db.Exec("UPDATE accounts SET sent=0")
+	http.Redirect(w, r, "/accounts", http.StatusFound)
+}
+
+func handleAPIRules(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{"Title": "API правила", "APIRules": app.APIRules}
+	render(w, "api-rules", data)
+}
+
+func handleAPIRulesSave(w http.ResponseWriter, r *http.Request) {
+	app.APIRules = r.FormValue("rules")
+	saveSettings()
+	http.Redirect(w, r, "/api-rules", http.StatusFound)
+}
+
+func handleSettings(w http.ResponseWriter, r *http.Request) {
+	loadSettings()
+	data := map[string]any{
+		"Title":          "Настройки",
+		"Domain":         app.Domain,
+		"UserAgent":      app.UserAgent,
+		"SendPerAccount": app.SendPerAccount,
+		"CycleAccounts":  app.CycleAccounts,
+		"Threads":        app.Threads,
+		"TestEmail":      app.TestEmail,
+		"TestEvery":      app.TestEvery,
+	}
+	render(w, "settings", data)
+}
+
+func handleSettingsSave(w http.ResponseWriter, r *http.Request) {
+	if d := r.FormValue("domain"); d != "" {
+		app.Domain = d
+	}
+	if ua := r.FormValue("useragent"); ua != "" {
+		app.UserAgent = ua
+	}
+	if n := r.FormValue("sendlimit"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			app.SendPerAccount = v
+		}
+	}
+	if t := r.FormValue("threads"); t != "" {
+		if v, err := strconv.Atoi(t); err == nil && v > 0 {
+			app.Threads = v
+		}
+	}
+	if te := r.FormValue("testemail"); te != "" {
+		app.TestEmail = te
+	}
+	if n := r.FormValue("testevery"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			app.TestEvery = v
+		} else {
+			app.TestEvery = 0
+		}
+	}
+	app.CycleAccounts = r.FormValue("cycle") == "on"
+	if p := r.FormValue("password"); p != "" {
+		app.AdminPass = p
+	}
+	msg := "Сохранено"
+	if err := saveSettings(); err != nil {
+		msg = "Ошибка сохранения: " + err.Error()
+	}
+	loadSettings()
+	data := map[string]any{
+		"Title":          "Настройки",
+		"Domain":         app.Domain,
+		"UserAgent":      app.UserAgent,
+		"SendPerAccount": app.SendPerAccount,
+		"CycleAccounts":  app.CycleAccounts,
+		"Threads":        app.Threads,
+		"TestEmail":      app.TestEmail,
+		"TestEvery":      app.TestEvery,
+		"Message":        msg,
+	}
+	render(w, "settings", data)
+}
+
+func parseEmailFormat(line, format string) (EmailEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return EmailEntry{}, false
+	}
+	switch format {
+	case "name_angle", "name_angle_semicolon":
+		line = strings.TrimSuffix(line, ";")
+		var name, email string
+		if i := strings.Index(line, "<"); i >= 0 {
+			if j := strings.Index(line, ">"); j > i {
+				email = strings.TrimSpace(line[i+1 : j])
+				name = strings.TrimSpace(line[:i])
+			}
+		}
+		if email == "" {
+			email = line
+		}
+		if name == "" {
+			if at := strings.Index(email, "@"); at > 0 {
+				name = email[:at]
+			}
+		}
+		return EmailEntry{Name: name, Email: email}, true
+	case "email":
+		line = strings.TrimSuffix(line, ";")
+		email := line
+		name := email
+		if at := strings.Index(email, "@"); at > 0 {
+			name = email[:at]
+		}
+		return EmailEntry{Name: name, Email: email}, true
+	default:
+		return parseEmail(line)
+	}
+}
+
+func parseEmail(line string) (EmailEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return EmailEntry{}, false
+	}
+	line = strings.TrimSuffix(line, ";")
+	var name, email string
+	if i := strings.Index(line, "<"); i >= 0 {
+		if j := strings.Index(line, ">"); j > i {
+			email = strings.TrimSpace(line[i+1 : j])
+			name = strings.TrimSpace(line[:i])
+		}
+	}
+	if email == "" {
+		email = line
+	}
+	if name == "" {
+		if at := strings.Index(email, "@"); at > 0 {
+			name = email[:at]
+		}
+	}
+	return EmailEntry{Name: name, Email: email}, true
+}
+
+func parseAccount(line string) (Account, bool) {
+	parts := strings.Split(strings.TrimSpace(line), ":")
+	if len(parts) < 6 {
+		return Account{}, false
+	}
+	return Account{
+		Login:     parts[0],
+		Password:  parts[1],
+		FirstName: parts[2],
+		LastName:  parts[3],
+		APIKey:    parts[4],
+		UUID:      parts[5],
+		Sent:      0,
+	}, true
+}
+
+func getMacro(name string) *Macro {
+	for i := range app.Macros {
+		if app.Macros[i].Name == name {
+			return &app.Macros[i]
+		}
+	}
+	return nil
+}
+
+func macroValue(m *Macro) string {
+	if m.Every <= 0 {
+		m.Every = 1
+	}
+	if m.Used%m.Every == 0 {
+		switch m.Type {
+		case "counter":
+			m.Last = strconv.Itoa(m.Counter)
+			m.Counter += m.Step
+		case "random":
+			n := m.Min
+			if m.Max > m.Min {
+				n = m.Min + rand.Intn(m.Max-m.Min+1)
+			}
+			var b strings.Builder
+			for i := 0; i < n; i++ {
+				if len(m.Chars) == 0 {
+					m.Chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+				}
+				b.WriteByte(m.Chars[rand.Intn(len(m.Chars))])
+			}
+			m.Last = b.String()
+		case "list":
+			if len(m.Values) > 0 {
+				if m.Sequential {
+					m.Last = m.Values[m.Index%len(m.Values)]
+					m.Index++
+				} else {
+					m.Last = m.Values[rand.Intn(len(m.Values))]
+				}
+			} else {
+				m.Last = ""
+			}
+		case "multi":
+			res := replaceMacros(m.Expr)
+			switch m.Encoding {
+			case "base64":
+				m.Last = base64.StdEncoding.EncodeToString([]byte(res))
+			case "qp":
+				var b bytes.Buffer
+				w := quotedprintable.NewWriter(&b)
+				w.Write([]byte(res))
+				w.Close()
+				m.Last = b.String()
+			default:
+				m.Last = res
+			}
+		}
+	}
+	m.Used++
+	vals, _ := json.Marshal(m.Values)
+	seq := 0
+	if m.Sequential {
+		seq = 1
+	}
+	db.Exec("UPDATE macros SET counter=?,step=?,chars=?,min=?,max=?,every=?,used=?,last=?,vals=?,sequential=?,idx=?,expr=?,encoding=? WHERE name=?",
+		m.Counter, m.Step, m.Chars, m.Min, m.Max, m.Every, m.Used, m.Last, string(vals), seq, m.Index, m.Expr, m.Encoding, m.Name)
+	return m.Last
+}
+
+func replaceMacros(text string) string {
+	for {
+		start := strings.Index(text, "{{$")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(text[start:], "}}")
+		if end == -1 {
+			break
+		}
+		end += start
+		name := text[start+3 : end]
+		if m := getMacro(name); m != nil {
+			val := macroValue(m)
+			text = text[:start] + val + text[end+2:]
+		} else {
+			text = text[:start] + text[end+2:]
+		}
+	}
+	return text
+}
+
+func replaceInline(body string, atts []Attachment) (string, error) {
+	for _, a := range atts {
+		if a.Inline {
+			data, err := os.ReadFile(a.Path)
+			if err != nil {
+				return body, err
+			}
+			enc := base64.StdEncoding.EncodeToString(data)
+			body = strings.ReplaceAll(body, a.InlineMacro, enc)
+		}
+	}
+	return body, nil
+}
+
+func sanitizeDocx(path string) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return
+	}
+	defer r.Close()
+	tmp := path + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return
+	}
+	w := zip.NewWriter(out)
+	removeType := "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
+	for _, f := range r.File {
+		if f.Name == "word/stylesWithEffects.xml" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		if strings.HasSuffix(f.Name, ".rels") {
+			var rels struct {
+				XMLName xml.Name `xml:"Relationships"`
+				Xmlns   string   `xml:"xmlns,attr"`
+				Rels    []struct {
+					ID     string `xml:"Id,attr"`
+					Type   string `xml:"Type,attr"`
+					Target string `xml:"Target,attr"`
+				} `xml:"Relationship"`
+			}
+			if err := xml.Unmarshal(data, &rels); err == nil {
+				filtered := rels.Rels[:0]
+				for _, r := range rels.Rels {
+					if r.Type != removeType {
+						filtered = append(filtered, r)
+					}
+				}
+				rels.Rels = filtered
+				data, _ = xml.Marshal(rels)
+				data = append([]byte(xml.Header), data...)
+			}
+		}
+		fh := f.FileHeader
+		fh.Method = zip.Deflate
+		wfh, err := w.CreateHeader(&fh)
+		if err != nil {
+			continue
+		}
+		wfh.Write(data)
+	}
+	w.Close()
+	out.Close()
+	os.Remove(path)
+	os.Rename(tmp, path)
+}
+
+func randomizeImage(path string, mime string, params map[string]int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	img, _, err := image.Decode(file)
+	file.Close()
+	if err != nil {
+		return err
+	}
+	w := img.Bounds().Dx()
+	h := img.Bounds().Dy()
+	left := randInRange(params["left_min"], params["left_max"])
+	right := randInRange(params["right_min"], params["right_max"])
+	top := randInRange(params["top_min"], params["top_max"])
+	bottom := randInRange(params["bottom_min"], params["bottom_max"])
+	canvas := image.NewRGBA(image.Rect(0, 0, w+left+right, h+top+bottom))
+	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	draw.Draw(canvas, image.Rect(left, top, left+w, top+h), img, image.Point{}, draw.Over)
+	dots := randInRange(params["dots_min"], params["dots_max"])
+	palette := []color.Color{
+		color.Black, color.White,
+		color.RGBA{255, 0, 0, 255}, color.RGBA{0, 255, 0, 255}, color.RGBA{0, 0, 255, 255},
+		color.RGBA{255, 255, 0, 255}, color.RGBA{0, 255, 255, 255}, color.RGBA{255, 0, 255, 255},
+		color.RGBA{128, 0, 0, 255}, color.RGBA{0, 128, 0, 255}, color.RGBA{0, 0, 128, 255},
+		color.RGBA{128, 128, 0, 255}, color.RGBA{0, 128, 128, 255}, color.RGBA{128, 0, 128, 255},
+		color.RGBA{192, 192, 192, 255}, color.RGBA{128, 128, 128, 255},
+	}
+	for i := 0; i < dots; i++ {
+		x := rand.Intn(canvas.Bounds().Dx())
+		y := rand.Intn(canvas.Bounds().Dy())
+		canvas.Set(x, y, palette[rand.Intn(len(palette))])
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	switch mime {
+	case "image/png":
+		err = png.Encode(out, canvas)
+	case "image/gif":
+		err = gif.Encode(out, canvas, nil)
+	default:
+		err = jpeg.Encode(out, canvas, &jpeg.Options{Quality: 90})
+	}
+	return err
+}
+
+func randInRange(min, max int) int {
+	if max < min {
+		max = min
+	}
+	if max == min {
+		return min
+	}
+	return min + rand.Intn(max-min+1)
+}
+
+func checkAccount(acc *Account, log *strings.Builder) error {
+	url := fmt.Sprintf("https://%s/api/mobile/v1/reset_fresh?app_state=active&uuid=%s", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Host", app.Domain)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Language", "ru-RU;q=1, en-RU;q=0.9")
+	status, body, err := doAccountRequest(acc, log, req, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("код %d", status)
+	}
+	var res struct {
+		Status struct {
+			Status int `json:"status"`
+		} `json:"status"`
+	}
+	json.Unmarshal(body, &res)
+	if res.Status.Status != 1 {
+		return fmt.Errorf("аккаунт не активен")
+	}
+	return nil
+}
+
+func generateOperationID(acc *Account, log *strings.Builder) (string, error) {
+	url := fmt.Sprintf("https://%s/api/mobile/v2/generate_operation_id?app_state=foreground&uuid=%s&client=iphone", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Host", app.Domain)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Language", "ru-RU;q=1")
+	req.Header.Set("Content-Length", "0")
+	req.Header.Set("Connection", "close")
+	status, body, err := doAccountRequest(acc, log, req, nil)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("код %d", status)
+	}
+	var res struct {
+		OperationID string `json:"operation_id"`
+	}
+	json.Unmarshal(body, &res)
+	if res.OperationID == "" {
+		return "", fmt.Errorf("нет operation_id")
+	}
+	return res.OperationID, nil
+}
+
+func sendEmail(subject, body string, atts []Attachment, recipients []EmailEntry, method string, firstSep bool) (string, error) {
+	var log strings.Builder
+	if len(app.Accounts) == 0 {
+		return log.String(), ErrNoAccounts
+	}
+	if len(recipients) == 0 {
+		return log.String(), fmt.Errorf("нет получателей")
+	}
+
+	var recipientStrs []string
+	for _, e := range recipients {
+		recipientStrs = append(recipientStrs, fmt.Sprintf("\"%s\" <%s>", e.Name, e.Email))
+	}
+
+	// choose account considering send limits
+	accountMu.Lock()
+	var acc *Account
+	for i := 0; i < len(app.Accounts); i++ {
+		idx := (app.CurrentAccount + i) % len(app.Accounts)
+		a := &app.Accounts[idx]
+		if a.Sent < app.SendPerAccount && !a.InUse {
+			acc = a
+			a.InUse = true
+			app.CurrentAccount = idx
+			break
+		}
+	}
+	if acc == nil {
+		accountMu.Unlock()
+		return log.String(), ErrNoAccounts
+	}
+	if acc.Proxy == "" {
+		acc.Proxy = getProxy()
+		db.Exec("UPDATE accounts SET proxy=? WHERE login=?", acc.Proxy, acc.Login)
+	}
+	accountMu.Unlock()
+	defer func() {
+		accountMu.Lock()
+		acc.InUse = false
+		accountMu.Unlock()
+	}()
+
+	if err := checkAccount(acc, &log); err != nil {
+		return log.String(), err
+	}
+	opID, err := generateOperationID(acc, &log)
+	if err != nil {
+		return log.String(), err
+	}
+
+	body, err = replaceInline(body, atts)
+	if err != nil {
+		return log.String(), err
+	}
+	body = replaceMacros(body)
+	subject = replaceMacros(subject)
+
+	var attIDs []string
+	for _, a := range atts {
+		id, url, err := uploadAttachment(acc, a.Path, &log)
+		if err != nil {
+			return log.String(), err
+		}
+		attIDs = append(attIDs, id)
+		body = strings.ReplaceAll(body, a.Macro, url)
+	}
+	payload := map[string]any{
+		"att_ids":       attIDs,
+		"attachesCount": len(attIDs),
+		"send":          body,
+		"ttype":         "html",
+		"subj":          subject,
+		"operation_id":  opID,
+		"compose_check": "1",
+		"from_mailbox":  acc.Login,
+		"from_name":     acc.FirstName,
+	}
+	switch method {
+	case "cc":
+		if firstSep && len(recipientStrs) > 0 {
+			payload["to"] = recipientStrs[0]
+			if len(recipientStrs) > 1 {
+				payload["cc"] = strings.Join(recipientStrs[1:], ";")
+			}
+		} else {
+			payload["cc"] = strings.Join(recipientStrs, ";")
+		}
+	case "bcc":
+		if firstSep && len(recipientStrs) > 0 {
+			payload["to"] = recipientStrs[0]
+			if len(recipientStrs) > 1 {
+				payload["bcc"] = strings.Join(recipientStrs[1:], ";")
+			}
+		} else {
+			payload["bcc"] = strings.Join(recipientStrs, ";")
+		}
+	default:
+		payload["to"] = strings.Join(recipientStrs, ";")
+	}
+	b, _ := json.Marshal(payload)
+	url := fmt.Sprintf("https://%s/api/mobile/v1/send?app_state=foreground&uuid=%s", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
+	req.Header.Set("Host", app.Domain)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Language", "ru-RU;q=1")
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("X-Request-Timeout", "180000")
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Connection", "close")
+	status, respBody, err := doAccountRequest(acc, &log, req, b)
+	if err != nil {
+		return log.String(), err
+	}
+	if status != http.StatusOK {
+		return log.String(), fmt.Errorf("код %d", status)
+	}
+	var res struct {
+		Status struct {
+			Status int `json:"status"`
+		} `json:"status"`
+	}
+	json.Unmarshal(respBody, &res)
+	if res.Status.Status != 1 {
+		return log.String(), fmt.Errorf("отправка не удалась")
+	}
+	accountMu.Lock()
+	acc.Sent++
+	db.Exec("UPDATE accounts SET sent=?, proxy=? WHERE login=?", acc.Sent, acc.Proxy, acc.Login)
+	if acc.Sent >= app.SendPerAccount {
+		app.CurrentAccount = (app.CurrentAccount + 1) % len(app.Accounts)
+	}
+	accountMu.Unlock()
+	return log.String(), nil
+}
+
+func uploadAttachment(acc *Account, path string, log *strings.Builder) (string, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	writer.WriteField("filename", filepath.Base(path))
+	part, err := writer.CreateFormFile("attachment", filepath.Base(path))
+	if err != nil {
+		return "", "", err
+	}
+	io.Copy(part, file)
+	writer.Close()
+
+	bodyBytes := buf.Bytes()
+	url := fmt.Sprintf("https://%s/api/mobile/v1/upload?app_state=foreground&uuid=%s&client=iphone", app.Domain, acc.UUID)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "OAuth "+acc.APIKey)
+	req.Header.Set("User-Agent", app.UserAgent)
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	status, respBody, err := doAccountRequest(acc, log, req, bodyBytes)
+	if err != nil {
+		return "", "", err
+	}
+	if status != http.StatusOK {
+		return "", "", fmt.Errorf("код %d", status)
+	}
+	var res struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	}
+	json.Unmarshal(respBody, &res)
+	return res.ID, res.URL, nil
+}

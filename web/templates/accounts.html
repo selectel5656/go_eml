@@ -1,0 +1,19 @@
+{{define "content"}}
+<h2>Аккаунты API</h2>
+<form method="POST" action="/accounts/add">
+    <input type="text" name="account" placeholder="login@domen.ru:password:Имя:Фамилия:API_KEY:uuid">
+    <input type="submit" value="Добавить">
+</form>
+<form method="POST" action="/accounts/upload" enctype="multipart/form-data">
+    <input type="file" name="file">
+    <input type="submit" value="Загрузить файл">
+</form>
+<form method="POST" action="/accounts/reset">
+    <input type="submit" value="Скинуть счетчики отправок">
+</form>
+<ul>
+    {{range $i, $a := .Accounts}}
+    <li>{{$a.Login}} {{$a.UUID}} отправлено {{$a.Sent}} <a href="/accounts/delete?i={{$i}}" class="delete-link">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}

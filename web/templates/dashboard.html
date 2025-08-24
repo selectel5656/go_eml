@@ -1,0 +1,55 @@
+{{define "content"}}
+<h2>Письмо</h2>
+{{if .Message}}<div class="message">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<form method="POST" action="/send">
+    <label>Тема:</label>
+    <input type="text" name="subject">
+
+    <label>Текст:</label>
+    <textarea name="body" rows="5"></textarea>
+
+    <label>Аттачи:</label>
+    <div class="att-list">
+        {{range $i, $a := .Attachments}}
+        <label><input type="checkbox" name="attach" value="{{$i}}"> {{$a.Name}}</label><br>
+        {{end}}
+    </div>
+    {{range $a := .Attachments}}
+        {{if $a.Inline}}
+        <div class="inline-hint">{{$a.Name}} макрос: {{$a.InlineMacro}}<br><code>&lt;img src="data:{{$a.Mime}};base64,{{$a.InlineMacro}}"&gt;</code></div>
+        {{end}}
+    {{end}}
+
+    <label>Получателей:</label>
+    <input type="number" name="rcount" value="1" min="1">
+
+    <label>Метод добавления:</label>
+    <select name="rmethod">
+        <option value="to">TO</option>
+        <option value="cc">CC</option>
+        <option value="bcc">BCC</option>
+    </select>
+    <label><input type="checkbox" name="firstsep"> Первый в TO, остальные в выбранное поле</label>
+
+    <input type="submit" value="Запустить отправку" {{if .Sending}}disabled{{end}}>
+</form>
+
+<form method="POST" action="/send/stop">
+    <input type="submit" value="Стоп" {{if not .Sending}}disabled{{end}}>
+</form>
+<form method="POST" action="/queue/reset">
+    <input type="submit" value="Сброс очереди">
+</form>
+
+<label>Прогресс:</label>
+<progress id="send-progress" value="0" max="100"></progress>
+<span id="progress-text">0/0</span>
+<div>Ошибки: <span id="error-count">0</span> <a id="error-download" href="/errors" style="display:none">скачать</a></div>
+
+<label>Лог запросов:</label>
+<textarea class="log" readonly>{{.Log}}</textarea>
+<form method="POST" action="/logs/clear">
+    <input type="submit" value="Очистить логи">
+</form>
+{{end}}

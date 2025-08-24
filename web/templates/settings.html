@@ -1,0 +1,15 @@
+{{define "content"}}
+<h2>Настройки</h2>
+<form method="POST" action="/settings/save">
+    <label>Домен API:</label><input type="text" name="domain" value="{{.Domain}}"><br>
+    <label>User-Agent:</label><input type="text" name="useragent" value="{{.UserAgent}}"><br>
+    <label>Писем на аккаунт:</label><input type="number" name="sendlimit" value="{{.SendPerAccount}}"><br>
+    <label>Гонять аккаунты по кругу:</label><input type="checkbox" name="cycle" {{if .CycleAccounts}}checked{{end}}><br>
+    <label>Потоков отправки:</label><input type="number" name="threads" value="{{.Threads}}"><br>
+    <label>Email для проверки:</label><input type="text" name="testemail" value="{{.TestEmail}}"><br>
+    <label>Проверочное письмо каждые N отправок:</label><input type="number" name="testevery" value="{{.TestEvery}}" min="0"><br>
+    <label>Новый пароль администратора:</label><input type="password" name="password"><br>
+    <input type="submit" value="Сохранить">
+</form>
+{{if .Message}}<p style="color:green">{{.Message}}</p>{{end}}
+{{end}}

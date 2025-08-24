@@ -1,0 +1,16 @@
+{{define "content"}}
+<h2>Прокси</h2>
+<form method="POST" action="/proxies/add">
+    <input type="text" name="proxy" placeholder="ip:port">
+    <input type="submit" value="Добавить">
+</form>
+<form method="POST" action="/proxies/upload" enctype="multipart/form-data">
+    <input type="file" name="file">
+    <input type="submit" value="Загрузить файл">
+</form>
+<ul>
+    {{range $i, $p := .Proxies}}
+    <li>{{$p.Address}} - {{if $p.Alive}}ok{{else}}fail{{end}} <a href="/proxies/delete?i={{$i}}" class="delete-link">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}

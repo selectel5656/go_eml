@@ -1,0 +1,24 @@
+{{define "content"}}
+<h2>База e-mail</h2>
+<form method="POST" action="/emails/add">
+    <input type="text" name="email" placeholder="Имя <login@domain.com>">
+    <input type="submit" value="Добавить">
+</form>
+<form method="POST" action="/emails/upload" enctype="multipart/form-data">
+    <select name="format">
+        <option value="name_angle">Имя &lt;login@domen.ru&gt;</option>
+        <option value="name_angle_semicolon">Имя &lt;login@domen.ru&gt;;</option>
+        <option value="email">login@domen.ru</option>
+    </select>
+    <input type="file" name="file">
+    <input type="submit" value="Загрузить файл">
+</form>
+<form method="POST" action="/emails/reset">
+    <input type="submit" value="Сбросить статусы">
+</form>
+<ul>
+    {{range $i, $e := .Emails}}
+    <li>{{if $e.Name}}{{$e.Name}} &lt;{{$e.Email}}&gt;{{else}}{{$e.Email}}{{end}} {{if $e.Sent}}(отправлено){{end}} <a href="/emails/delete?i={{$i}}" class="delete-link">удалить</a></li>
+    {{end}}
+</ul>
+{{end}}

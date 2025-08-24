@@ -1,0 +1,43 @@
+{{define "content"}}
+<h2>Аттачи</h2>
+<form method="POST" action="/attachments/add" enctype="multipart/form-data">
+    <input type="file" name="file">
+    <select name="atype" id="att-type">
+        <option value="image">Изображение</option>
+        <option value="docx">DOCX</option>
+        <option value="pdf">PDF</option>
+        <option value="other">Другое</option>
+    </select>
+    <div id="image-opts">
+        <label><input type="checkbox" name="inline">Использовать внутри письма (для картинок)</label>
+        <br>
+        <label><input type="checkbox" name="randomize" id="rand-cb">Рандомизация</label>
+        <div id="rand-opts" style="display:none">
+            Отступ слева от <input type="number" name="left_min" value="0" style="width:60px"> до <input type="number" name="left_max" value="0" style="width:60px"><br>
+            Отступ справа от <input type="number" name="right_min" value="0" style="width:60px"> до <input type="number" name="right_max" value="0" style="width:60px"><br>
+            Отступ сверху от <input type="number" name="top_min" value="0" style="width:60px"> до <input type="number" name="top_max" value="0" style="width:60px"><br>
+            Отступ снизу от <input type="number" name="bottom_min" value="0" style="width:60px"> до <input type="number" name="bottom_max" value="0" style="width:60px"><br>
+            Точек от <input type="number" name="dots_min" value="0" style="width:60px"> до <input type="number" name="dots_max" value="0" style="width:60px">
+        </div>
+    </div>
+    <div id="docx-opts" style="display:none">
+        <label>Страниц от <input type="number" name="pages_min" value="0" style="width:60px"></label>
+        <label>до <input type="number" name="pages_max" value="0" style="width:60px"></label><br>
+        <textarea name="page_content" placeholder="Содержимое последней страницы"></textarea><br>
+        <label><input type="checkbox" name="convert_pdf">Конвертировать в PDF</label>
+        <label>Автор PDF: <input type="text" name="pdf_author"></label>
+    </div>
+    <input type="submit" value="Загрузить">
+</form>
+<ul>
+    {{range $i, $a := .Attachments}}
+    <li>
+        {{$a.Name}} {{$a.Macro}}
+        {{if $a.Inline}}
+            {{$a.InlineMacro}} пример: &lt;img src="data:{{$a.Mime}};base64,{{$a.InlineMacro}}"&gt;
+        {{end}}
+        <a href="/attachments/delete?i={{$i}}" class="delete-link">удалить</a>
+    </li>
+    {{end}}
+</ul>
+{{end}}

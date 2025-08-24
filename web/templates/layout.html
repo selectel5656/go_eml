@@ -1,0 +1,27 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{.Title}}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+    <a href="/dashboard">Письмо</a>
+    <a href="/emails">База e-mail</a>
+    <a href="/macros">Макросы</a>
+    <a href="/attachments">Аттачи</a>
+    <a href="/api-rules">API правила</a>
+    <a href="/proxies">Прокси</a>
+    <a href="/accounts">Аккаунты API</a>
+    <a href="/settings">Настройки</a>
+    <a href="/logout">Выход</a>
+</nav>
+<div class="container">
+{{template "content" .}}
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
